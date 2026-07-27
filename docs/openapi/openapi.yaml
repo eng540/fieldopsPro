@@ -1,0 +1,1185 @@
+openapi: 3.1.0
+info:
+  title: FieldOps SaaS V4.0 API
+  version: 4.0.0-sprint0
+  description: |
+    Multi-Tenant Offline-First Field Operations Platform.
+
+    ## Constitutional Principles
+    - **Multi-Tenant Isolation:** Every request carries `org_id` + `project_scope` + `role_scope`
+    - **Server-Reconciled State:** Sync ≠ Truth. The server is the absolute source of truth.
+    - **Monotonic Progress:** Progress cannot decrease without Rework Flag + Justification + Audit.
+    - **Exactly-Once Sync:** `operation_uuid` + `processed_operations` registry.
+    - **Explainable Governance:** Every decision returns `{decision, matched_rule, reason, policy_version}`.
+
+    ## Authentication
+    Short-lived JWT (15 min) + HttpOnly Refresh Token (7 days, rotated).
+    JWT carries identity only; full authorization is server-side.
+  contact:
+    name: FieldOps Architecture Team
+    email: arch@fieldops.dev
+  license:
+    name: Proprietary
+    url: https://fieldops.dev/license
+
+servers:
+  - url: http://localhost:8000
+    description: Local Development
+  - url: https://api-staging.fieldops.dev
+    description: Staging Environment
+  - url: https://api.fieldops.dev
+    description: Production Environment
+
+# ─────────────────────────────────────────
+# SECURITY
+# ─────────────────────────────────────────
+security:
+  - BearerAuth: []
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Short-lived access token (15 minutes). 
+        Include in Authorization header: `Bearer <token>`
+
+    RefreshCookie:
+      type: apiKey
+      in: cookie
+      name: refresh_token
+      description: HttpOnly secure cookie for refresh token rotation.
+
+  schemas:
+    # ─────────────────────────────────────
+    # ERROR MODELS
+    # ─────────────────────────────────────
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          example: "VALIDATION_ERROR"
+        message:
+          type: string
+          example: "Invalid request parameters"
+        details:
+          type: object
+          nullable: true
+
+    # ─────────────────────────────────────
+    # AUTH MODELS
+    # ─────────────────────────────────────
+    LoginRequest:
+      type: object
+      required: [email, password, device_public_key]
+      properties:
+        email:
+          type: string
+          format: email
+          example: "engineer@nrc.org"
+        password:
+          type: string
+          format: password
+          minLength: 8
+          example: "SecurePass123!"
+        device_public_key:
+          type: string
+          description: Ed25519 or RSA public key for device trust
+          example: "-----BEGIN PUBLIC KEY-----..."
+
+    LoginResponse:
+      type: object
+      required: [access_token, token_type, expires_in, session_id]
+      properties:
+        access_token:
+          type: string
+          example: "eyJhbGciOiJIUzI1NiIs..."
+        token_type:
+          type: string
+          example: "bearer"
+        expires_in:
+          type: integer
+          description: Seconds until expiration
+          example: 900
+        session_id:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        user:
+          $ref: "#/components/schemas/UserContext"
+
+    UserContext:
+      type: object
+      required: [id, email, role, org_id, projects]
+      properties:
+        id:
+          type: integer
+          example: 15
+        email:
+          type: string
+          example: "engineer@nrc.org"
+        role:
+          type: string
+          enum: [SUPER_ADMIN, ORG_ADMIN, PROJECT_MANAGER, FIELD_ENGINEER]
+          example: "FIELD_ENGINEER"
+        org_id:
+          type: integer
+          example: 7
+        projects:
+          type: array
+          items:
+            type: integer
+          description: Project IDs this user is assigned to
+          example: [12, 15]
+        name:
+          type: string
+          example: "Ahmed Al-Mansouri"
+
+    RefreshRequest:
+      type: object
+      description: Refresh token is sent automatically via HttpOnly cookie
+
+    LogoutRequest:
+      type: object
+      required: [session_id]
+      properties:
+        session_id:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        revoke_all:
+          type: boolean
+          default: false
+          description: Revoke all sessions for this user
+
+    # ─────────────────────────────────────
+    # SYNC MODELS
+    # ─────────────────────────────────────
+    SyncPullRequest:
+      type: object
+      properties:
+        last_sync_version:
+          type: string
+          description: Last known server sync version (cursor)
+          example: "2024-05-30T12:00:00Z"
+        project_ids:
+          type: array
+          items:
+            type: integer
+          description: Projects to sync (scoped by user permissions)
+          example: [12, 15]
+
+    SyncPullResponse:
+      type: object
+      required: [sync_version, bundle, has_more]
+      properties:
+        sync_version:
+          type: string
+          example: "2024-05-30T14:30:00Z"
+        bundle:
+          $ref: "#/components/schemas/SyncBundle"
+        has_more:
+          type: boolean
+          example: false
+
+    SyncBundle:
+      type: object
+      properties:
+        projects:
+          type: array
+          items:
+            $ref: "#/components/schemas/Project"
+        units:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProjectUnit"
+        boq_items:
+          type: array
+          items:
+            $ref: "#/components/schemas/BoQItem"
+        remark_templates:
+          type: array
+          items:
+            $ref: "#/components/schemas/RemarkTemplate"
+        decisions:
+          type: array
+          items:
+            $ref: "#/components/schemas/GovernanceDecision"
+
+    SyncPushRequest:
+      type: object
+      required: [operations]
+      properties:
+        operations:
+          type: array
+          items:
+            $ref: "#/components/schemas/SyncOperation"
+          maxItems: 1000
+          description: Batch of operations to push
+
+    SyncOperation:
+      type: object
+      required: [operation_uuid, operation_type, entity_type, entity_id, payload, device_timestamp]
+      properties:
+        operation_uuid:
+          type: string
+          format: uuid
+          description: Unique ID for idempotency (Exactly-Once)
+          example: "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+        operation_type:
+          type: string
+          enum: [CREATE, UPDATE, DELETE]
+          example: "UPDATE"
+        entity_type:
+          type: string
+          enum: [UNIT_PROGRESS, REMARK, DAILY_LOG]
+          example: "UNIT_PROGRESS"
+        entity_id:
+          type: string
+          description: Client-side or server-side entity identifier
+          example: "unit-123-boq-456"
+        payload:
+          type: object
+          description: Operation-specific payload
+        device_timestamp:
+          type: string
+          format: date-time
+          description: Device-local timestamp (for conflict resolution reference)
+          example: "2024-05-30T10:05:00Z"
+        server_timestamp:
+          type: string
+          format: date-time
+          nullable: true
+          description: Server timestamp if known from previous sync
+
+    SyncPushResponse:
+      type: object
+      required: [processed, conflicts, next_sync_version]
+      properties:
+        processed:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: Successfully processed operation_uuids
+        conflicts:
+          type: array
+          items:
+            $ref: "#/components/schemas/SyncConflict"
+        next_sync_version:
+          type: string
+          example: "2024-05-30T14:35:00Z"
+
+    SyncConflict:
+      type: object
+      required: [operation_uuid, conflict_type, server_value, client_value]
+      properties:
+        operation_uuid:
+          type: string
+          format: uuid
+        conflict_type:
+          type: string
+          enum: [MONOTONIC_VIOLATION, TIMESTAMP_SKEW, CONCURRENT_EDIT, POLICY_BLOCK]
+          example: "MONOTONIC_VIOLATION"
+        server_value:
+          type: object
+          description: Current server state
+        client_value:
+          type: object
+          description: Client attempted value
+        resolution_hint:
+          type: string
+          example: "Progress cannot decrease. Use Rework Flag with justification."
+
+    # ─────────────────────────────────────
+    # PROJECT MODELS
+    # ─────────────────────────────────────
+    Project:
+      type: object
+      required: [id, org_id, name, status]
+      properties:
+        id:
+          type: integer
+          example: 12
+        org_id:
+          type: integer
+          example: 7
+        name:
+          type: string
+          example: "WASH Latrines — Hodeidah 2024"
+        code:
+          type: string
+          example: "NRC-WASH-HOD-2024"
+        status:
+          type: string
+          enum: [DRAFT, ACTIVE, COMPLETED, ARCHIVED]
+          example: "ACTIVE"
+        location:
+          type: object
+          properties:
+            latitude:
+              type: number
+              example: 14.8021
+            longitude:
+              type: number
+              example: 42.9513
+            governorate:
+              type: string
+              example: "Hodeidah"
+        start_date:
+          type: string
+          format: date
+          example: "2024-01-15"
+        end_date:
+          type: string
+          format: date
+          example: "2024-12-31"
+        created_at:
+          type: string
+          format: date-time
+
+    ProjectUnit:
+      type: object
+      required: [id, project_id, unit_type, status]
+      properties:
+        id:
+          type: integer
+          example: 1042
+        project_id:
+          type: integer
+          example: 12
+        unit_type:
+          type: string
+          enum: [LATRINE, SCHOOL, BOREHOLE, SHELTER, ROAD]
+          example: "LATRINE"
+        unit_code:
+          type: string
+          example: "LAT-HOD-1042"
+        status:
+          type: string
+          enum: [PLANNED, IN_PROGRESS, COMPLETED, ON_HOLD, CANCELLED]
+          example: "IN_PROGRESS"
+        beneficiary_count:
+          type: integer
+          example: 5
+        gps_coordinates:
+          type: object
+          properties:
+            lat:
+              type: number
+            lng:
+              type: number
+        last_activity:
+          type: string
+          format: date-time
+          description: Timestamp of last sync/update
+
+    # ─────────────────────────────────────
+    # BOQ MODELS
+    # ─────────────────────────────────────
+    BoQItem:
+      type: object
+      required: [id, project_id, item_code, description, unit_of_measure]
+      properties:
+        id:
+          type: integer
+          example: 456
+        project_id:
+          type: integer
+          example: 12
+        item_code:
+          type: string
+          example: "BOQ-001-CONCRETE"
+        description:
+          type: string
+          example: "Reinforced concrete slab, 15cm thick"
+        unit_of_measure:
+          type: string
+          example: "m2"
+        planned_quantity:
+          type: number
+          example: 150.0
+        unit_price:
+          type: number
+          example: 45.50
+        currency:
+          type: string
+          example: "USD"
+
+    UnitBoQProgress:
+      type: object
+      required: [unit_id, boq_item_id, completion_pct, status]
+      properties:
+        unit_id:
+          type: integer
+          example: 1042
+        boq_item_id:
+          type: integer
+          example: 456
+        completion_pct:
+          type: number
+          minimum: 0
+          maximum: 100
+          example: 73.5
+          description: Monotonic — cannot decrease without Rework Flag
+        status:
+          type: string
+          enum: [NOT_STARTED, IN_PROGRESS, COMPLETED, REWORK_REQUIRED]
+          example: "IN_PROGRESS"
+        measured_quantity:
+          type: number
+          example: 110.25
+          description: Actual measured quantity (may differ from planned)
+        rework_flag:
+          type: boolean
+          default: false
+          description: Required for any decrease in completion_pct
+        rework_reason:
+          type: string
+          nullable: true
+          example: "Quality inspection revealed insufficient reinforcement"
+        rework_authorized_by:
+          type: integer
+          nullable: true
+          description: User ID who authorized the rework
+        last_updated:
+          type: string
+          format: date-time
+
+    # ─────────────────────────────────────
+    # QUALITY / REMARK MODELS
+    # ─────────────────────────────────────
+    RemarkTemplate:
+      type: object
+      required: [id, org_id, category, issue, severity]
+      properties:
+        id:
+          type: integer
+          example: 23
+        org_id:
+          type: integer
+          example: 7
+        category:
+          type: string
+          enum: [STRUCTURAL, ELECTRICAL, PLUMBING, SAFETY, FINISHING]
+          example: "STRUCTURAL"
+        issue:
+          type: string
+          example: "Cracks in concrete slab"
+        severity:
+          type: string
+          enum: [CRITICAL, MAJOR, MINOR, OBSERVATION]
+          example: "MAJOR"
+        recommended_action:
+          type: string
+          example: "Demolish and re-pour with proper reinforcement"
+        auto_hold:
+          type: boolean
+          default: false
+          description: Automatically trigger governance HOLD
+
+    Remark:
+      type: object
+      required: [id, unit_id, template_id, severity, status]
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+        unit_id:
+          type: integer
+          example: 1042
+        template_id:
+          type: integer
+          nullable: true
+          example: 23
+        custom_issue:
+          type: string
+          nullable: true
+          example: "Custom issue not in template library"
+        severity:
+          type: string
+          enum: [CRITICAL, MAJOR, MINOR, OBSERVATION]
+          example: "MAJOR"
+        status:
+          type: string
+          enum: [OPEN, IN_REVIEW, RESOLVED, CLOSED]
+          example: "OPEN"
+        photos:
+          type: array
+          items:
+            type: string
+          description: URLs to uploaded photos
+        gps_tag:
+          type: object
+          properties:
+            lat:
+              type: number
+            lng:
+              type: number
+            accuracy:
+              type: number
+        created_by:
+          type: integer
+          example: 15
+        created_at:
+          type: string
+          format: date-time
+        resolved_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    # ─────────────────────────────────────
+    # GOVERNANCE MODELS
+    # ─────────────────────────────────────
+    GovernanceDecision:
+      type: object
+      required: [id, unit_id, boq_item_id, decision, policy_version]
+      properties:
+        id:
+          type: integer
+          example: 789
+        unit_id:
+          type: integer
+          example: 1042
+        boq_item_id:
+          type: integer
+          example: 456
+        decision:
+          type: string
+          enum: [APPROVE, APPROVE_WITH_NOTE, HOLD, STOP, REWORK]
+          example: "HOLD"
+        payment_pct:
+          type: number
+          minimum: 0
+          maximum: 100
+          example: 0
+        flag:
+          type: string
+          example: "Major Defect - Withhold Payment"
+        matched_rule:
+          type: string
+          example: "RULE_003"
+        reason:
+          type: string
+          example: "Quality inspection failed with MAJOR severity remark"
+        policy_version:
+          type: integer
+          example: 4
+        explainability:
+          type: object
+          properties:
+            rule_priority:
+              type: integer
+              example: 100
+            conditions_met:
+              type: array
+              items:
+                type: string
+              example: ["quality_pass: fail", "highest_remark: major"]
+            override_applied:
+              type: boolean
+              example: false
+        override:
+          type: object
+          nullable: true
+          properties:
+            overridden_by:
+              type: integer
+              example: 8
+            justification:
+              type: string
+              example: "Emergency repair required — donor approved exception"
+            overridden_at:
+              type: string
+              format: date-time
+        created_at:
+          type: string
+          format: date-time
+
+    DecisionOverrideRequest:
+      type: object
+      required: [decision_id, justification]
+      properties:
+        decision_id:
+          type: integer
+          example: 789
+        justification:
+          type: string
+          minLength: 20
+          example: "Emergency humanitarian need overrides standard hold policy per donor directive dated 2024-05-20"
+        new_payment_pct:
+          type: number
+          minimum: 0
+          maximum: 100
+          nullable: true
+          example: 50
+
+    # ─────────────────────────────────────
+    # REPORTING MODELS
+    # ─────────────────────────────────────
+    IPCExportRequest:
+      type: object
+      required: [project_id, period_start, period_end]
+      properties:
+        project_id:
+          type: integer
+          example: 12
+        period_start:
+          type: string
+          format: date
+          example: "2024-05-01"
+        period_end:
+          type: string
+          format: date
+          example: "2024-05-31"
+        format:
+          type: string
+          enum: [XLSX, PDF]
+          default: XLSX
+
+    DashboardSummary:
+      type: object
+      properties:
+        project_id:
+          type: integer
+          example: 12
+        total_units:
+          type: integer
+          example: 500
+        completed_units:
+          type: integer
+          example: 320
+        in_progress_units:
+          type: integer
+          example: 150
+        on_hold_units:
+          type: integer
+          example: 30
+        overall_progress_pct:
+          type: number
+          example: 64.0
+        financial_summary:
+          type: object
+          properties:
+            total_contract_value:
+              type: number
+              example: 250000.00
+            approved_to_date:
+              type: number
+              example: 160000.00
+            blocked_amount:
+              type: number
+              example: 45000.00
+            pending_approval:
+              type: number
+              example: 45000.00
+        risk_indicators:
+          type: array
+          items:
+            type: object
+            properties:
+              indicator:
+                type: string
+                example: "CRITICAL_REMARKS"
+              count:
+                type: integer
+                example: 5
+              trend:
+                type: string
+                enum: [IMPROVING, STABLE, WORSENING]
+                example: "WORSENING"
+
+# ─────────────────────────────────────────
+# PATHS
+# ─────────────────────────────────────────
+paths:
+  # ═══════════════════════════════════════
+  # AUTHENTICATION
+  # ═══════════════════════════════════════
+  /auth/login:
+    post:
+      summary: Authenticate user and register device
+      description: |
+        Returns short-lived access token + sets HttpOnly refresh cookie.
+        Device public key is registered for future sync request signing.
+      tags: [Authentication & IAM]
+      security: []  # Public endpoint
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Authentication successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+              description: HttpOnly refresh_token cookie
+        "401":
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: Device not trusted or account disabled
+
+  /auth/refresh:
+    post:
+      summary: Refresh access token
+      description: |
+        Uses HttpOnly refresh cookie to issue new access token.
+        Implements Refresh Token Rotation (old token invalidated).
+      tags: [Authentication & IAM]
+      security:
+        - RefreshCookie: []
+      responses:
+        "200":
+          description: New access token issued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token:
+                    type: string
+                  expires_in:
+                    type: integer
+        "401":
+          description: Invalid or revoked refresh token
+
+  /auth/logout:
+    post:
+      summary: Revoke session
+      description: |
+        Revokes current session. If revoke_all=true, revokes ALL user sessions.
+        Clears HttpOnly refresh cookie.
+      tags: [Authentication & IAM]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LogoutRequest"
+      responses:
+        "200":
+          description: Logout successful
+        "401":
+          description: Invalid session
+
+  # ═══════════════════════════════════════
+  # SYNC ENGINE (Offline-First Core)
+  # ═══════════════════════════════════════
+  /sync/pull:
+    post:
+      summary: Pull server state for offline work
+      description: |
+        Downloads all data needed for offline field work.
+        Respects user's project_scope and role_scope.
+        Uses cursor-based pagination for large datasets.
+      tags: [Sync Engine]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SyncPullRequest"
+      responses:
+        "200":
+          description: Sync bundle returned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SyncPullResponse"
+        "403":
+          description: Access denied to requested projects
+
+  /sync/push:
+    post:
+      summary: Push offline operations to server
+      description: |
+        Uploads queued operations from device to server.
+        Implements Exactly-Once processing via operation_uuid.
+        Returns conflicts for manual resolution if needed.
+      tags: [Sync Engine]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SyncPushRequest"
+      responses:
+        "200":
+          description: Operations processed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SyncPushResponse"
+        "207":
+          description: Multi-Status — some operations failed
+        "409":
+          description: Governance conflict — requires PM override
+
+  # ═══════════════════════════════════════
+  # PROJECTS & UNITS
+  # ═══════════════════════════════════════
+  /projects:
+    get:
+      summary: List accessible projects
+      description: |
+        Returns projects scoped by user's org_id + project assignments.
+        Super Admin sees all; Field Engineer sees assigned only.
+      tags: [Projects & Units]
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [DRAFT, ACTIVE, COMPLETED, ARCHIVED]
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 200
+      responses:
+        "200":
+          description: Paginated project list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Project"
+                  total:
+                    type: integer
+                  page:
+                    type: integer
+
+  /projects/{project_id}/units:
+    get:
+      summary: List units in project
+      description: |
+        Returns units for a specific project.
+        Supports filtering by status and unit_type.
+      tags: [Projects & Units]
+      parameters:
+        - name: project_id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: status
+          in: query
+          schema:
+            type: string
+        - name: unit_type
+          in: query
+          schema:
+            type: string
+        - name: last_activity_after
+          in: query
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: Unit list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ProjectUnit"
+        "403":
+          description: User not assigned to this project
+
+  # ═══════════════════════════════════════
+  # FIELD EXECUTION
+  # ═══════════════════════════════════════
+  /execution/progress:
+    post:
+      summary: Update unit BoQ progress
+      description: |
+        Updates completion percentage for a unit's BoQ item.
+        **Constitutional Rule:** Monotonic Progress — cannot decrease without Rework Flag.
+        Server timestamp is authoritative; device timestamp is advisory.
+      tags: [Field Execution]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UnitBoQProgress"
+      responses:
+        "200":
+          description: Progress updated
+        "409":
+          description: Monotonic violation — use Rework Flag
+        "422":
+          description: Validation error
+
+  /execution/bulk-progress:
+    post:
+      summary: Bulk update progress (Speed Entry Matrix)
+      description: |
+        Updates multiple units at once for grid-based entry.
+        Max 100 units per request.
+      tags: [Field Execution]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                updates:
+                  type: array
+                  maxItems: 100
+                  items:
+                    $ref: "#/components/schemas/UnitBoQProgress"
+      responses:
+        "200":
+          description: Bulk update processed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  succeeded:
+                    type: integer
+                  failed:
+                    type: integer
+                  conflicts:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SyncConflict"
+
+  # ═══════════════════════════════════════
+  # QUALITY CONTROL
+  # ═══════════════════════════════════════
+  /quality/remarks:
+    post:
+      summary: Create QC remark (Append-Only)
+      description: |
+        Creates a new quality remark. Remarks are append-only events.
+        UUID is generated client-side to prevent duplicates during sync.
+      tags: [Quality Control]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Remark"
+      responses:
+        "201":
+          description: Remark created
+        "200":
+          description: Remark already existed (idempotent)
+
+  /quality/remarks/{remark_id}:
+    patch:
+      summary: Update remark status (resolve/close)
+      description: |
+        Updates remark status. Only status field is mutable.
+        Resolution requires photo evidence.
+      tags: [Quality Control]
+      parameters:
+        - name: remark_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status:
+                  type: string
+                  enum: [IN_REVIEW, RESOLVED, CLOSED]
+                resolution_notes:
+                  type: string
+                resolution_photos:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        "200":
+          description: Remark updated
+
+  /quality/templates:
+    get:
+      summary: List remark templates (Smart QC Library)
+      description: |
+        Returns organization's remark template library.
+        Supports contextual filtering by category.
+      tags: [Quality Control]
+      parameters:
+        - name: category
+          in: query
+          schema:
+            type: string
+            enum: [STRUCTURAL, ELECTRICAL, PLUMBING, SAFETY, FINISHING]
+        - name: severity
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Template list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RemarkTemplate"
+
+  # ═══════════════════════════════════════
+  # GOVERNANCE ENGINE
+  # ═══════════════════════════════════════
+  /governance/decisions/{unit_id}:
+    get:
+      summary: Get governance decisions for unit
+      description: |
+        Returns explainable governance decisions for a unit.
+        Includes override history and audit trail.
+      tags: [Governance Engine]
+      parameters:
+        - name: unit_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Decision list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/GovernanceDecision"
+
+  /governance/override:
+    post:
+      summary: Override governance decision
+      description: |
+        Allows PM/OrgAdmin to override an automatic governance decision.
+        **Requires:** justification (min 20 chars) + allowed role.
+        **Triggers:** Optimistic locking check + Audit Trail entry.
+      tags: [Governance Engine]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DecisionOverrideRequest"
+      responses:
+        "200":
+          description: Override applied
+        "409":
+          description: Optimistic locking conflict — decision was modified
+        "403":
+          description: Insufficient privileges for override
+
+  /governance/policies:
+    get:
+      summary: List active governance policies
+      description: |
+        Returns organization's governance policy matrix.
+        Includes versioning information.
+      tags: [Governance Engine]
+      responses:
+        "200":
+          description: Policy list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  active_policy:
+                    type: string
+                    example: "NRC Strict Governance"
+                  version:
+                    type: integer
+                    example: 4
+                  rules:
+                    type: array
+                    items:
+                      type: object
+
+  # ═══════════════════════════════════════
+  # REPORTING & ANALYTICS
+  # ═══════════════════════════════════════
+  /reporting/ipc:
+    post:
+      summary: Generate IPC (Interim Payment Certificate)
+      description: |
+        Generates governed financial statement.
+        Reads from Governance Layer — NOT raw progress.
+        Blocked amounts shown in dedicated column.
+      tags: [Reporting & Analytics]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IPCExportRequest"
+      responses:
+        "200":
+          description: IPC file generated
+          content:
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+
+  /reporting/dashboard/{project_id}:
+    get:
+      summary: Project 360° Dashboard
+      description: |
+        Returns real-time project analytics.
+        All metrics are server-derived and cacheable.
+      tags: [Reporting & Analytics]
+      parameters:
+        - name: project_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Dashboard data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardSummary"

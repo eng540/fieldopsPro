@@ -1,0 +1,197 @@
+name: CI — FieldOps V4.0
+
+on:
+  push:
+    branches: [main, staging, feature/*]
+  pull_request:
+    branches: [main, staging]
+
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "20"
+  POSTGRES_VERSION: "16"
+
+jobs:
+  # ─────────────────────────────────────────
+  # BACKEND VALIDATION
+  # ─────────────────────────────────────────
+  backend-check:
+    name: Backend Lint + Type Check + Test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: fieldops_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: 1.8.2
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: backend/.venv
+          key: ${{ runner.os }}-poetry-${{ hashFiles('backend/poetry.lock') }}
+
+      - name: Install dependencies
+        run: |
+          cd backend
+          poetry install --no-interaction --no-ansi
+
+      - name: Lint (Ruff)
+        run: |
+          cd backend
+          poetry run ruff check app tests --output-format=github
+
+      - name: Format check (Black)
+        run: |
+          cd backend
+          poetry run black --check app tests
+
+      - name: Type check (MyPy)
+        run: |
+          cd backend
+          poetry run mypy app --strict --pretty
+
+      - name: Run migrations
+        env:
+          DATABASE_URL: postgresql+asyncpg://test:test@localhost:5432/fieldops_test
+        run: |
+          cd backend
+          poetry run alembic upgrade head
+
+      - name: Run tests
+        env:
+          DATABASE_URL: postgresql+asyncpg://test:test@localhost:5432/fieldops_test
+          REDIS_URL: redis://localhost:6379/1
+          SECRET_KEY: test-secret-key-ci-only
+        run: |
+          cd backend
+          poetry run pytest -xvs --cov=app --cov-report=xml --cov-report=term
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: backend/coverage.xml
+          fail_ci_if_error: false
+
+  # ─────────────────────────────────────────
+  # FRONTEND VALIDATION
+  # ─────────────────────────────────────────
+  frontend-check:
+    name: Frontend Lint + Type Check + Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          cd frontend
+          npm ci
+
+      - name: Lint
+        run: |
+          cd frontend
+          npm run lint
+
+      - name: Type check
+        run: |
+          cd frontend
+          npx tsc --noEmit
+
+      - name: Unit tests
+        run: |
+          cd frontend
+          npm run test -- --run --coverage
+
+  # ─────────────────────────────────────────
+  # OPENAPI VALIDATION
+  # ─────────────────────────────────────────
+  openapi-check:
+    name: OpenAPI Contract Validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install Redocly CLI
+        run: npm install -g @redocly/cli@latest
+
+      - name: Validate OpenAPI
+        run: |
+          redocly lint docs/openapi/openapi.yaml
+
+      - name: Build API docs
+        run: |
+          redocly build-docs docs/openapi/openapi.yaml -o docs/api/index.html
+
+      - name: Upload API docs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-docs
+          path: docs/api/index.html
+
+  # ─────────────────────────────────────────
+  # E2E SMOKE TEST
+  # ─────────────────────────────────────────
+  e2e-smoke:
+    name: E2E Smoke Test
+    runs-on: ubuntu-latest
+    needs: [backend-check, frontend-check]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup environment
+        run: |
+          docker compose -f infrastructure/docker/docker-compose.yml up -d
+          sleep 15  # Wait for services
+
+      - name: Health check
+        run: |
+          curl -f http://localhost:8000/health || exit 1
+          curl -f http://localhost:3000 || exit 1
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker compose -f infrastructure/docker/docker-compose.yml down -v

@@ -1,0 +1,31 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+.pytest_cache
+htmlcov
+.coverage
+.venv
+venv/
+
+# Node
+node_modules
+npm-debug.log
+
+# IDE
+.idea
+.vscode
+
+# Docs
+README.md
+docs/
+
+# Tests (in production builds)
+tests/
