@@ -180,16 +180,7 @@ async def find_session_by_hashed_token(
     This is the lookup used during refresh to find the session
     associated with the plaintext refresh token from the cookie/body.
     """
-    from passlib.context import CryptContext
-
-    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-    # We can't look up by hash directly since bcrypt generates different hashes
-    # each time. Instead we need to find active sessions for the user and check each.
-    # But we don't have the user_id yet... We need a different approach.
-
-    # Actually, the refresh_token JWT contains the session_id in its claims.
-    # We decode the token to get the session_id, then look up by session_id.
+    # No longer importing passlib — using our own verify_password
     payload = decode_token(refresh_token)
     if not payload or payload.get("type") != "refresh":
         return None
@@ -205,8 +196,8 @@ async def find_session_by_hashed_token(
     if not session:
         return None
 
-    # Verify the token hash matches
-    if not pwd_context.verify(refresh_token, session.refresh_token_hash):
+    # Verify the token hash matches (Using our direct bcrypt function)
+    if not verify_password(refresh_token, session.refresh_token_hash):
         return None
 
     return session
