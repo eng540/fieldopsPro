@@ -31,10 +31,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   deviceSecret: null,
 
   login: async (email, password, deviceKey) => {
-    // بناء كائن الطلب، وإضافة مفتاح الجهاز فقط إذا كان موجوداً وغير فارغ
-    const payload: any = { email, password }
-    if (deviceKey && deviceKey.trim() !== '') {
-      payload.device_public_key = deviceKey.trim()
+    // بناء كائن الطلب، وإرسال null إذا كان مفتاح الجهاز فارغاً
+    const payload = {
+      email: email,
+      password: password,
+      device_public_key: (deviceKey && deviceKey.trim() !== '') ? deviceKey.trim() : null
     }
 
     const response = await fetch(`${API_BASE}/auth/login`, {
@@ -45,19 +46,18 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
     if (!response.ok) {
       const body = await response.json().catch(() => ({}))
-      // استخراج الخطأ بشكل صحيح سواء كان نصاً أو مصفوفة أخطاء 422
       let detail = `Login failed (${response.status})`
       if (typeof body.detail === 'string') {
         detail = body.detail
       } else if (Array.isArray(body.detail)) {
-        detail = body.detail.map((e: any) => e.msg).join(', ')
+        // استخراج تفاصيل خطأ 422 لكي نرى بالضبط ما هو الحقل المرفوض
+        detail = body.detail.map((e: any) => `${e.loc.join('.')}: ${e.msg}`).join(' | ')
       }
       throw new Error(detail)
     }
 
     const data = await response.json()
 
-    // Store in memory ONLY (ADR-004: no localStorage/cookies for access token)
     set({
       isAuthenticated: true,
       accessToken: data.access_token,
