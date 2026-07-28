@@ -225,14 +225,14 @@ function CreateRemarkModal({
     } else {
       // Queue as sync operation
       await db.syncQueue.put({
-        id: uuidv4(),
-        operation_type: 'CREATE',
-        entity_type: 'REMARK',
-        entity_id: remarkId,
+        operationUuid: uuidv4(),
+        operationType: 'CREATE',
+        entityType: 'REMARK',
+        entityId: remarkId,
         payload,
-        device_timestamp: new Date().toISOString(),
-        retry_count: 0,
-        created_at: new Date().toISOString(),
+        deviceTimestamp: new Date().toISOString(),
+        retryCount: 0,
+        status: 'PENDING'
       })
       onCreated()
     }
