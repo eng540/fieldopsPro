@@ -31,15 +31,27 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   deviceSecret: null,
 
   login: async (email, password, deviceKey) => {
+    // بناء كائن الطلب، وإضافة مفتاح الجهاز فقط إذا كان موجوداً وغير فارغ
+    const payload: any = { email, password }
+    if (deviceKey && deviceKey.trim() !== '') {
+      payload.device_public_key = deviceKey.trim()
+    }
+
     const response = await fetch(`${API_BASE}/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password, device_public_key: deviceKey || undefined }),
+      body: JSON.stringify(payload),
     })
 
     if (!response.ok) {
       const body = await response.json().catch(() => ({}))
-      const detail = body.detail || `Login failed (${response.status})`
+      // استخراج الخطأ بشكل صحيح سواء كان نصاً أو مصفوفة أخطاء 422
+      let detail = `Login failed (${response.status})`
+      if (typeof body.detail === 'string') {
+        detail = body.detail
+      } else if (Array.isArray(body.detail)) {
+        detail = body.detail.map((e: any) => e.msg).join(', ')
+      }
       throw new Error(detail)
     }
 
