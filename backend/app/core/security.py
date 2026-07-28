@@ -6,29 +6,35 @@ Constitutional Principles:
 - Device trust via cryptographic key pairs.
 - Every token has unique ID (jti) for granular revocation.
 """
+import hashlib
+import bcrypt
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
-import bcrypt
 from jose import JWTError, jwt
 
 from app.core.config import settings
 
+def _prepare_secret(secret: str) -> bytes:
+    """Prepare secret for bcrypt. If > 72 bytes, pre-hash with SHA-256."""
+    b_secret = secret.encode("utf-8")
+    if len(b_secret) > 72:
+        # Bcrypt has a 72-byte limit. Pre-hashing prevents ValueError for long tokens.
+        return hashlib.sha256(b_secret).hexdigest().encode("utf-8")
+    return b_secret
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify plain password against hash using bcrypt directly."""
+    """Verify plain password against hash."""
     return bcrypt.checkpw(
-        plain_password.encode("utf-8"),
+        _prepare_secret(plain_password),
         hashed_password.encode("utf-8")
     )
 
-
 def get_password_hash(password: str) -> str:
-    """Hash a password using bcrypt directly."""
+    """Hash a password."""
     salt = bcrypt.gensalt()
-    return bcrypt.hashpw(password.encode("utf-8"), salt).decode("utf-8")
-
+    return bcrypt.hashpw(_prepare_secret(password), salt).decode("utf-8")
 
 def _build_token_payload(
     subject: str | int,
@@ -36,11 +42,7 @@ def _build_token_payload(
     expires_delta: timedelta,
     **claims: Any,
 ) -> dict[str, Any]:
-    """Build standard JWT payload with jti and timestamps.
-
-    Constitutional: No role/permission claims allowed.
-    Only identity, org reference, and session metadata.
-    """
+    """Build standard JWT payload with jti and timestamps."""
     now = datetime.now(timezone.utc)
     expire = now + expires_delta
 
@@ -63,21 +65,13 @@ def _build_token_payload(
 
     return payload
 
-
 def create_access_token(
     subject: str | int,
     org_id: int,
     session_id: str,
     token_version: int = 1,
 ) -> tuple[str, str]:
-    """Create short-lived JWT access token.
-
-    Returns:
-        tuple: (token_string, jti)
-
-    Constitutional: JWT carries identity + scope_reference only.
-    Full authorization is server-side.
-    """
+    """Create short-lived JWT access token."""
     payload = _build_token_payload(
         subject=subject,
         token_type="access",
@@ -90,13 +84,8 @@ def create_access_token(
     token = jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
     return token, payload["jti"]
 
-
 def create_refresh_token(subject: str | int, session_id: str) -> tuple[str, str]:
-    """Create long-lived refresh token.
-
-    Returns:
-        tuple: (token_string, jti)
-    """
+    """Create long-lived refresh token."""
     payload = _build_token_payload(
         subject=subject,
         token_type="refresh",
@@ -107,7 +96,6 @@ def create_refresh_token(subject: str | int, session_id: str) -> tuple[str, str]
     token = jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
     return token, payload["jti"]
 
-
 def decode_token(token: str) -> dict[str, Any] | None:
     """Decode and validate JWT. Returns None if invalid."""
     try:
@@ -116,7 +104,6 @@ def decode_token(token: str) -> dict[str, Any] | None:
     except JWTError:
         return None
 
-
 def get_token_jti(token: str) -> str | None:
     """Extract jti from token without full validation."""
     try:
@@ -124,7 +111,6 @@ def get_token_jti(token: str) -> str | None:
         return payload.get("jti")
     except Exception:
         return None
-
 
 def get_token_expiry(token: str) -> datetime | None:
     """Extract expiry timestamp from token."""
