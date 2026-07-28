@@ -27,6 +27,8 @@ export interface LocalProject {
   endDate?: string
   lastSyncedAt: string
   isActive: boolean // Smart Caching: true = loaded, false = archived
+  totalUnits?: number
+  completionPct?: number
 }
 
 export interface LocalUnit {

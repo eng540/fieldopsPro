@@ -268,14 +268,14 @@ function WorkOrderDetailModal({
 
   const queueOffline = async (payload: Record<string, unknown>) => {
     await db.syncQueue.put({
-      id: uuidv4(),
-      operation_type: 'UPDATE',
-      entity_type: 'WORK_ORDER',
-      entity_id: workOrder.id,
+      operationUuid: uuidv4(),
+      operationType: 'UPDATE',
+      entityType: 'WORK_ORDER',
+      entityId: String(workOrder.id),
       payload,
-      device_timestamp: new Date().toISOString(),
-      retry_count: 0,
-      created_at: new Date().toISOString(),
+      deviceTimestamp: new Date().toISOString(),
+      retryCount: 0,
+      status: 'PENDING'
     })
   }
 
