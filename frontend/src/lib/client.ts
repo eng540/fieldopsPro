@@ -1,13 +1,14 @@
-"""API Client — FieldOps V4.0
-
-HTTP client with automatic Bearer token injection and 401 retry with refresh.
-
-Constitutional (ADR-004):
-- Access token stored in memory ONLY (no localStorage/cookies)
-- Refresh token in memory (production: HttpOnly cookie)
-- 401 responses trigger silent refresh before retry
-- On refresh failure, calls logout() to clear state
-"""
+/**
+ * API Client — FieldOps V4.0
+ *
+ * HTTP client with automatic Bearer token injection and 401 retry with refresh.
+ *
+ * Constitutional (ADR-004):
+ * - Access token stored in memory ONLY (no localStorage/cookies)
+ * - Refresh token in memory (production: HttpOnly cookie)
+ * - 401 responses trigger silent refresh before retry
+ * - On refresh failure, calls logout() to clear state
+ */
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
