@@ -84,7 +84,7 @@ export interface LocalRemarkTemplate {
 export interface SyncOperation {
   operationUuid: string
   operationType: 'CREATE' | 'UPDATE' | 'DELETE'
-  entityType: 'UNIT_PROGRESS' | 'REMARK' | 'DAILY_LOG'
+  entityType: 'WORK_ORDER' | 'UNIT_PROGRESS' | 'REMARK' | 'DAILY_LOG'
   entityId: string
   payload: Record<string, unknown>
   deviceTimestamp: string
