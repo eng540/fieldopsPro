@@ -56,11 +56,11 @@ export const useSyncStore = create<SyncState>((set, get) => ({
       // 2. Pull latest from server
       const lastSyncVersion = get().lastSyncVersion
       const pullResult = await pullFromServer(lastSyncVersion)
-      if (pullResult?.sync_version) {
-        localStorage.setItem('lastSyncVersion', pullResult.sync_version)
+      if (pullResult?.syncVersion) {
+        localStorage.setItem('lastSyncVersion', pullResult.syncVersion)
         localStorage.setItem('lastSyncAt', new Date().toISOString())
         set({
-          lastSyncVersion: pullResult.sync_version,
+          lastSyncVersion: pullResult.syncVersion,
           lastSyncAt: new Date().toISOString(),
         })
       }
@@ -79,7 +79,7 @@ export const useSyncStore = create<SyncState>((set, get) => ({
       // Re-queue the operation — will be retried next sync
       const op = await db.syncQueue.get(operationUuid)
       if (op) {
-        await db.syncQueue.put({ ...op, retry_count: 0 })
+        await db.syncQueue.put({ ...op, retryCount: 0 })
       }
     }
     // Either way, remove from conflict list
