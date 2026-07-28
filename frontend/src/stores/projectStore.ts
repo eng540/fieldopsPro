@@ -33,13 +33,14 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         const data = await resp.json()
         const projects: LocalProject[] = data.items.map((p: any) => ({
           id: p.id,
-          org_id: p.org_id,
+          orgId: p.org_id,
           name: p.name,
           code: p.code,
           status: p.status,
-          completion_pct: p.completion_pct,
-          total_units: p.total_units,
-          synced_at: new Date().toISOString(),
+          completionPct: p.completion_pct,
+          totalUnits: p.total_units,
+          syncedAt: new Date().toISOString(),
+          isActive: true
         }))
         await db.projects.bulkPut(projects)
         set({ projects, isLoading: false })
