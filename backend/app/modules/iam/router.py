@@ -107,14 +107,8 @@ async def login(
     # Authenticate
     user = await authenticate_user(db, email=data.email, password=data.password)
     if not user:
-        # Create audit log for failed login
-        await create_audit_log(
-            db,
-            org_id=0,  # Can't determine org for failed login
-            action=AuditAction.LOGIN_FAILED.value,
-            details={"email": data.email},
-            ip_address=request.client.host if request.client else None,
-        )
+        # لا يمكننا تسجيل تدقيق فاشل بدون معرفة org_id الصحيح
+        # تم حذف create_audit_log(org_id=0) لتجنب خطأ قاعدة البيانات
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
