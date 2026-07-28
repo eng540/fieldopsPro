@@ -29,8 +29,8 @@ class LoginRequest(BaseModel):
         examples=["engineer@nrc.org"],
     )
     password: str = Field(
-        min_length=8,
-        description="User password (min 8 characters)",
+        min_length=6,
+        description="User password (min 6 characters)",
         examples=["SecurePass123!"],
     )
     device_public_key: str | None = Field(
@@ -76,8 +76,8 @@ class UserCreate(BaseModel):
         examples=["newuser@nrc.org"],
     )
     password: str = Field(
-        min_length=8,
-        description="User password (min 8 characters)",
+        min_length=6,
+        description="User password (min 6 characters)",
         examples=["SecurePass123!"],
     )
     name: str = Field(
