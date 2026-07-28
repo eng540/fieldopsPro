@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "fieldops-backend"
-version = "4.0.0-sprint0"
+version = "4.0.0"
 description = "FieldOps SaaS V4.0 -- Modular Monolith Backend"
 authors = ["FieldOps Architecture Team <arch@fieldops.dev>"]
 readme = "README.md"
