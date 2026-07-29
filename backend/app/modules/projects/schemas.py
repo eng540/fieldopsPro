@@ -107,3 +107,32 @@ class BOQItemRead(BaseModel):
     is_active: bool
     created_at: datetime
     model_config = {"from_attributes": True}
+
+# ─────────────────────────────────────────
+# NEW: Enterprise Bulk Import Schemas
+# ─────────────────────────────────────────
+
+class MasterBoQItem(BaseModel):
+    trade: str = Field(min_length=1, max_length=100)
+    description: str = Field(min_length=1)
+    quantity: float = Field(ge=0)
+    unit_of_measure: str = Field(default="item", max_length=50)
+
+class BeneficiaryItem(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    code: str = Field(min_length=1, max_length=50)
+    unit_type: str | None = Field(default="LATRINE")
+
+    @field_validator("code")
+    @classmethod
+    def code_uppercase(cls, v: str) -> str:
+        return v.upper().strip()
+
+class BulkImportRequest(BaseModel):
+    beneficiaries: list[BeneficiaryItem] = Field(min_length=1, description="List of beneficiaries to create")
+    master_boq: list[MasterBoQItem] = Field(min_length=1, description="Master BoQ to apply to ALL beneficiaries")
+
+class BulkImportResponse(BaseModel):
+    units_created: int
+    boq_items_created: int
+    message: str
