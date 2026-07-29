@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react'
 import { useProjectStore } from '@/stores/projectStore'
 import { Building2, PlusCircle, Loader2, ChevronRight } from 'lucide-react'
+import { ProjectDetailsScreen } from './ProjectDetailsScreen'
 
 export function ProjectsScreen() {
-  const { projects, isLoading, error, loadProjects, selectProject, createProject } = useProjectStore()
+  const { projects, isLoading, error, loadProjects, selectProject, createProject, selectedProjectId } = useProjectStore()
   const [showCreate, setShowCreate] = useState(false)
   const [name, setName] = useState('')
   const [code, setCode] = useState('')
@@ -24,6 +25,8 @@ export function ProjectsScreen() {
       setCreating(false)
     }
   }
+
+  if (selectedProjectId) return <ProjectDetailsScreen />
 
   if (isLoading) return (
     <div className="flex items-center justify-center h-64 text-slate-500">
