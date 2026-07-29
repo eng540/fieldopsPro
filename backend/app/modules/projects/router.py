@@ -1,6 +1,6 @@
 """PROJECTS Router — FieldOps V4.0
 
-Endpoints (7):
+Endpoints (8):
 1. POST   /projects                          — Create project
 2. GET    /projects                          — List projects (paginated)
 3. GET    /projects/{id}                     — Get project detail
@@ -8,6 +8,7 @@ Endpoints (7):
 5. POST   /projects/{id}/units               — Add unit to project
 6. GET    /projects/{id}/units               — List units
 7. POST   /projects/{id}/units/{uid}/boq     — Add BOQ item
+8. POST   /projects/{id}/bulk-import         — Bulk import units and apply Master BoQ
 """
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
@@ -20,10 +21,10 @@ from app.modules.projects.schemas import (
     BOQItemCreate, BOQItemRead,
     ProjectCreate, ProjectListResponse, ProjectRead, ProjectUpdate,
     UnitCreate, UnitListResponse, UnitRead,
+    BulkImportRequest, BulkImportResponse  # <--- الاستيرادات الجديدة
 )
 
 router = APIRouter()
-
 
 @router.post("", response_model=ProjectRead, status_code=201)
 async def create_project(
@@ -43,7 +44,6 @@ async def create_project(
     await db.refresh(project)
     return project
 
-
 @router.get("", response_model=ProjectListResponse)
 async def list_projects(
     page: int = Query(1, ge=1),
@@ -62,7 +62,6 @@ async def list_projects(
     items = (await db.execute(q.order_by(Project.created_at.desc()).offset((page-1)*page_size).limit(page_size))).scalars().all()
     return {"items": items, "total": total, "page": page, "page_size": page_size, "has_more": (page-1)*page_size+len(items) < total}
 
-
 @router.get("/{project_id}", response_model=ProjectRead)
 async def get_project(
     project_id: int,
@@ -74,7 +73,6 @@ async def get_project(
     if not project:
         raise HTTPException(status_code=404, detail=f"Project {project_id} not found.")
     return project
-
 
 @router.patch("/{project_id}", response_model=ProjectRead)
 async def update_project(
@@ -92,7 +90,6 @@ async def update_project(
     await db.flush()
     await db.refresh(project)
     return project
-
 
 @router.post("/{project_id}/units", response_model=UnitRead, status_code=201)
 async def create_unit(
@@ -112,7 +109,6 @@ async def create_unit(
     await db.refresh(unit)
     return unit
 
-
 @router.get("/{project_id}/units", response_model=UnitListResponse)
 async def list_units(
     project_id: int,
@@ -122,7 +118,6 @@ async def list_units(
     org_id = current_user["org_id"]
     items = (await db.execute(select(ProjectUnit).where(ProjectUnit.project_id == project_id, ProjectUnit.org_id == org_id))).scalars().all()
     return {"items": items, "total": len(items)}
-
 
 @router.post("/{project_id}/units/{unit_id}/boq", response_model=BOQItemRead, status_code=201)
 async def create_boq_item(
@@ -141,3 +136,76 @@ async def create_boq_item(
     await db.flush()
     await db.refresh(item)
     return item
+
+# ─────────────────────────────────────────
+# NEW: Enterprise Bulk Import Endpoint
+# ─────────────────────────────────────────
+@router.post("/{project_id}/bulk-import", response_model=BulkImportResponse, status_code=201)
+async def bulk_import_units_and_boq(
+    project_id: int,
+    data: BulkImportRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """
+    محرك الاستيراد الشامل:
+    يستقبل قائمة مستفيدين + قائمة بنود مرجعية (Master BoQ).
+    يقوم بإنشاء المستفيدين، ثم ينسخ البنود المرجعية آلياً لكل مستفيد.
+    """
+    org_id = current_user["org_id"]
+    
+    # 1. التحقق من وجود المشروع وصلاحية الوصول
+    project = (await db.execute(
+        select(Project).where(Project.id == project_id, Project.org_id == org_id)
+    )).scalar_one_or_none()
+    
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project {project_id} not found.")
+        
+    units_created = 0
+    boq_items_created = 0
+    
+    # 2. معالجة المستفيدين (Beneficiaries)
+    for ben in data.beneficiaries:
+        # التأكد من عدم تكرار كود المستفيد داخل نفس المشروع
+        existing_unit = (await db.execute(
+            select(ProjectUnit).where(ProjectUnit.project_id == project_id, ProjectUnit.code == ben.code)
+        )).scalar_one_or_none()
+        
+        if existing_unit:
+            continue # تخطي المستفيد الموجود مسبقاً لمنع الأخطاء
+            
+        # إنشاء المستفيد الجديد
+        new_unit = ProjectUnit(
+            org_id=org_id,
+            project_id=project_id,
+            name=ben.name,
+            code=ben.code,
+            unit_type=ben.unit_type
+        )
+        db.add(new_unit)
+        await db.flush() # تنفيذ الحفظ للحصول على ID المستفيد الجديد
+        units_created += 1
+        
+        # 3. تطبيق بنود الكميات المرجعية (Master BoQ) لهذا المستفيد
+        for boq in data.master_boq:
+            new_boq = BOQItem(
+                org_id=org_id,
+                unit_id=new_unit.id,
+                trade=boq.trade,
+                description=boq.description,
+                quantity=boq.quantity,
+                unit_of_measure=boq.unit_of_measure
+            )
+            db.add(new_boq)
+            boq_items_created += 1
+            
+    # 4. تحديث إجمالي عدد المستفيدين في المشروع
+    project.total_units = (project.total_units or 0) + units_created
+    await db.flush()
+    
+    return {
+        "units_created": units_created,
+        "boq_items_created": boq_items_created,
+        "message": f"Successfully imported {units_created} beneficiaries and generated {boq_items_created} BoQ items."
+    }
