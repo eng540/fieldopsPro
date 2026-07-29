@@ -16,6 +16,8 @@ interface ProjectState {
   createProject: (data: { name: string; code: string }) => Promise<void>
   createUnit: (projectId: number, data: { name: string; code: string; unit_type: string }) => Promise<void>
   createBoqItem: (projectId: number, unitId: number, data: { trade: string; description: string; quantity: number; unit_of_measure: string }) => Promise<void>
+  // الدالة الجديدة للاستيراد الشامل
+  bulkImportUnits: (projectId: number, payload: any) => Promise<any>
 }
 
 export const useProjectStore = create<ProjectState>((set, get) => ({
@@ -88,5 +90,17 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   createBoqItem: async (projectId, unitId, data) => {
     const resp = await apiClient.post(`/projects/${projectId}/units/${unitId}/boq`, data)
     if (!resp.ok) throw new Error('Failed to add BoQ Item')
+  },
+
+  bulkImportUnits: async (projectId, payload) => {
+    const resp = await apiClient.post(`/projects/${projectId}/bulk-import`, payload)
+    if (!resp.ok) {
+      const err = await resp.json()
+      throw new Error(err.detail || 'Bulk import failed')
+    }
+    // تحديث البيانات بعد الاستيراد الناجح
+    await get().loadProjects()
+    await get().loadUnits(projectId)
+    return await resp.json()
   }
 }))
