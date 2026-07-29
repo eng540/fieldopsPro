@@ -13,7 +13,9 @@ interface ProjectState {
   loadUnits: (projectId: number) => Promise<void>
   selectProject: (projectId: number | null) => void
   selectUnit: (unitId: number | null) => void
-  createProject: (data: { name: string; code: string; description?: string; location?: string }) => Promise<void>
+  createProject: (data: { name: string; code: string }) => Promise<void>
+  createUnit: (projectId: number, data: { name: string; code: string; unit_type: string }) => Promise<void>
+  createBoqItem: (projectId: number, unitId: number, data: { trade: string; description: string; quantity: number; unit_of_measure: string }) => Promise<void>
 }
 
 export const useProjectStore = create<ProjectState>((set, get) => ({
@@ -27,28 +29,19 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   loadProjects: async () => {
     set({ isLoading: true, error: null })
     try {
-      // Try server first
       const resp = await apiClient.get('/projects?page_size=100')
       if (resp.ok) {
         const data = await resp.json()
         const projects: LocalProject[] = data.items.map((p: any) => ({
-          id: p.id,
-          orgId: p.org_id,
-          name: p.name,
-          code: p.code,
-          status: p.status,
-          completionPct: p.completion_pct,
-          totalUnits: p.total_units,
-          syncedAt: new Date().toISOString(),
-          isActive: true
+          id: p.id, orgId: p.org_id, name: p.name, code: p.code,
+          status: p.status, completionPct: p.completion_pct,
+          totalUnits: p.total_units, syncedAt: new Date().toISOString(), isActive: true
         }))
         await db.projects.bulkPut(projects)
         set({ projects, isLoading: false })
         return
       }
-    } catch {
-      // Offline — fall through to IndexedDB
-    }
+    } catch { /* offline */ }
     const local = await db.projects.toArray()
     set({ projects: local, isLoading: false })
   },
@@ -60,33 +53,40 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       if (resp.ok) {
         const data = await resp.json()
         const units: LocalUnit[] = data.items.map((u: any) => ({
-          id: u.id,
-          org_id: u.org_id,
-          project_id: u.project_id,
-          name: u.name,
-          code: u.code,
-          status: u.status,
-          completion_pct: u.completion_pct,
-          synced_at: new Date().toISOString(),
+          id: u.id, projectId: u.project_id, unitType: u.unit_type,
+          unitCode: u.code, status: u.status,
+          lastActivity: u.updated_at, lastSyncedAt: new Date().toISOString()
         }))
         await db.units.bulkPut(units)
         set({ units, isLoading: false })
         return
       }
     } catch { /* offline */ }
-    const local = await db.units.where('project_id').equals(projectId).toArray()
+    const local = await db.units.where('projectId').equals(projectId).toArray()
     set({ units: local, isLoading: false })
   },
 
-  selectProject: (projectId) => set({ selectedProjectId: projectId, selectedUnitId: null }),
+  selectProject: (projectId) => {
+    set({ selectedProjectId: projectId, selectedUnitId: null })
+    if (projectId) get().loadUnits(projectId)
+  },
+  
   selectUnit: (unitId) => set({ selectedUnitId: unitId }),
 
   createProject: async (data) => {
     const resp = await apiClient.post('/projects', data)
-    if (!resp.ok) {
-      const err = await resp.json()
-      throw new Error(err.detail || 'Failed to create project')
-    }
+    if (!resp.ok) throw new Error('Failed to create project')
     await get().loadProjects()
   },
+
+  createUnit: async (projectId, data) => {
+    const resp = await apiClient.post(`/projects/${projectId}/units`, data)
+    if (!resp.ok) throw new Error('Failed to add beneficiary')
+    await get().loadUnits(projectId)
+  },
+
+  createBoqItem: async (projectId, unitId, data) => {
+    const resp = await apiClient.post(`/projects/${projectId}/units/${unitId}/boq`, data)
+    if (!resp.ok) throw new Error('Failed to add BoQ Item')
+  }
 }))
