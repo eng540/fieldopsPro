@@ -27,6 +27,8 @@ from app.core.security import (
     decode_token,
     get_password_hash,
     verify_password,
+    hash_token,
+    verify_token_hash,
 )
 from app.modules.iam.models import (
     AuditLog,
