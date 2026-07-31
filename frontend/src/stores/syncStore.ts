@@ -43,26 +43,20 @@ export const useSyncStore = create<SyncState>((set, get) => ({
     if (get().isSyncing) return
     set({ isSyncing: true })
     try {
-      // 1. Push pending operations
       const pushResult = await pushOperations()
       const newConflicts: SyncConflict[] = (pushResult?.conflicts ?? []).map((c: any) => ({
-        operationUuid: c.operation_uuid,
-        conflictType: c.conflict_type,
-        serverValue: c.server_value,
-        clientValue: c.client_value,
-        hint: c.resolution_hint,
+        operationUuid: c.operationUuid,
+        conflictType:  c.conflictType,
+        serverValue:   c.serverValue ?? {},
+        clientValue:   c.clientValue ?? {},
+        hint:          c.resolutionHint ?? '',
       }))
 
-      // 2. Pull latest from server
-      const lastSyncVersion = get().lastSyncVersion
-      const pullResult = await pullFromServer(lastSyncVersion)
-      if (pullResult?.sync_version) {
-        localStorage.setItem('lastSyncVersion', pullResult.sync_version)
+      const pullResult = await pullFromServer(get().lastSyncVersion)
+      if (pullResult?.syncVersion) {
+        localStorage.setItem('lastSyncVersion', pullResult.syncVersion)
         localStorage.setItem('lastSyncAt', new Date().toISOString())
-        set({
-          lastSyncVersion: pullResult.sync_version,
-          lastSyncAt: new Date().toISOString(),
-        })
+        set({ lastSyncVersion: pullResult.syncVersion, lastSyncAt: new Date().toISOString() })
       }
 
       const pending = await db.syncQueue.count()
@@ -76,26 +70,16 @@ export const useSyncStore = create<SyncState>((set, get) => ({
 
   resolveConflict: async (operationUuid, resolution) => {
     if (resolution === 'CLIENT') {
-      // Re-queue the operation — will be retried next sync
       const op = await db.syncQueue.get(operationUuid)
-      if (op) {
-        await db.syncQueue.put({ ...op, retry_count: 0 })
-      }
+      if (op) await db.syncQueue.put({ ...op, retryCount: 0 })
     }
-    // Either way, remove from conflict list
-    set(state => ({
-      conflicts: state.conflicts.filter(c => c.operationUuid !== operationUuid)
-    }))
+    set(state => ({ conflicts: state.conflicts.filter(c => c.operationUuid !== operationUuid) }))
   },
 
-  dismissConflict: (operationUuid) => {
-    set(state => ({
-      conflicts: state.conflicts.filter(c => c.operationUuid !== operationUuid)
-    }))
-  },
+  dismissConflict: (operationUuid) =>
+    set(state => ({ conflicts: state.conflicts.filter(c => c.operationUuid !== operationUuid) })),
 }))
 
-// Start monitoring reachability on module load
 startReachabilityMonitoring()
-window.addEventListener('online', () => useSyncStore.getState().checkOnline())
+window.addEventListener('online',  () => useSyncStore.getState().checkOnline())
 window.addEventListener('offline', () => useSyncStore.getState().checkOnline())

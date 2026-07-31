@@ -10,6 +10,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
+import hashlib
+
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 
@@ -18,15 +20,43 @@ from app.core.config import settings
 # Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
+# Bcrypt silently truncates inputs >72 bytes.
+# Pre-hash with SHA-256 (hex = 64 chars, always < 72) before passing to bcrypt.
+_BCRYPT_MAX_BYTES = 72
+
+
+def _prehash(secret: str) -> str:
+    """SHA-256 pre-hash — ensures input to bcrypt is always ≤72 bytes.
+
+    Constitutional: Applied to ANY secret (passwords, refresh tokens, device keys).
+    hex digest = 64 ASCII chars = 64 bytes — safely under the 72-byte bcrypt limit.
+    """
+    if len(secret.encode("utf-8")) <= _BCRYPT_MAX_BYTES:
+        return secret
+    return hashlib.sha256(secret.encode("utf-8")).hexdigest()
+
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify plain password against hash."""
-    return pwd_context.verify(plain_password, hashed_password)
+    """Verify plain password against hash (with bcrypt pre-hash guard)."""
+    return pwd_context.verify(_prehash(plain_password), hashed_password)
 
 
 def get_password_hash(password: str) -> str:
-    """Hash a password."""
-    return pwd_context.hash(password)
+    """Hash a password (with bcrypt pre-hash guard)."""
+    return pwd_context.hash(_prehash(password))
+
+
+def hash_token(token: str) -> str:
+    """Hash a refresh token for secure storage.
+    
+    Always uses pre-hash — refresh tokens are JWTs and always exceed 72 bytes.
+    """
+    return pwd_context.hash(_prehash(token))
+
+
+def verify_token_hash(token: str, hashed: str) -> bool:
+    """Verify a refresh token against its stored hash."""
+    return pwd_context.verify(_prehash(token), hashed)
 
 
 def _build_token_payload(

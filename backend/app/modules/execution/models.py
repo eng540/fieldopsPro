@@ -15,7 +15,7 @@ from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import (
-    Boolean,
+    Boolean, Index,
     DateTime,
     Float,
     ForeignKey,

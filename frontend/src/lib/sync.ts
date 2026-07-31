@@ -9,7 +9,7 @@
  */
 
 import { db, type SyncOperation, type LocalBoQProgress, type LocalProject, type LocalUnit, type LocalRemarkTemplate, type LocalDecision } from './db'
-import { apiClient } from './client'
+import { apiPost } from './client'
 
 const SYNC_CONFIG = {
   BATCH_SIZE: 100,
@@ -227,13 +227,9 @@ export async function pullFromServer(lastSyncVersion?: string | null): Promise<S
   }
 
   try {
-    const response = await apiClient.post('/sync/pull', {
+    const data = await apiPost('/sync/pull', {
       last_sync_version: lastSyncVersion ?? null,
     })
-
-    if (!response.ok) throw new Error(`Pull failed: ${response.status}`)
-
-    const data = await response.json()
 
     // ✅ FIXED (Sprint-4 M1.1): Apply bundle to IndexedDB atomically
     if (data.bundle) {
@@ -276,9 +272,7 @@ export async function pushToServer(): Promise<SyncPushResult> {
   }
 
   try {
-    const response = await apiClient.post('/sync/push', { operations: pending })
-    if (!response.ok) throw new Error(`Push failed: ${response.status}`)
-    const data = await response.json()
+    const data = await apiPost('/sync/push', { operations: pending })
 
     await db.syncQueue
       .where('operationUuid').anyOf(data.processed)

@@ -1,4 +1,4 @@
-"""API Client — FieldOps V4.0
+/** API Client — FieldOps V4.0
 
 HTTP client with automatic Bearer token injection and 401 retry with refresh.
 

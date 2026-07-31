@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { apiClient } from '@/lib/client'
+import { apiGet, apiPost, apiPatch } from '@/lib/client'
 import { useSyncStore } from '@/stores/syncStore'
 import { db } from '@/lib/db'
 import { v4 as uuidv4 } from 'uuid'
@@ -48,13 +48,8 @@ export function WorkOrdersScreen() {
     setLoading(true)
     setError(null)
     try {
-      const resp = await apiClient.get('/execution/work-orders?page_size=50')
-      if (resp.ok) {
-        const data = await resp.json()
-        setWorkOrders(data.items)
-      } else {
-        throw new Error('Server error')
-      }
+      const data = await apiGet<{ items: WorkOrder[] }>('/execution/work-orders?page_size=50')
+      setWorkOrders(data.items)
     } catch {
       setError('Offline — showing local data')
     } finally {
@@ -164,15 +159,11 @@ function CreateWorkOrderModal({ onClose, onCreated }: { onClose: () => void; onC
     setSaving(true)
     setError(null)
     try {
-      const resp = await apiClient.post('/execution/work-orders', {
+      await apiPost('/execution/work-orders', {
         title: title.trim(),
         project_id: parseInt(projectId),
       })
-      if (resp.ok) { onCreated() }
-      else {
-        const data = await resp.json()
-        setError(data.detail || 'Failed to create')
-      }
+      onCreated()
     } catch {
       setError('Network error — check connection')
     } finally {
@@ -250,10 +241,9 @@ function WorkOrderDetailModal({
 
     if (isOnline) {
       try {
-        const resp = await apiClient.patch(`/execution/work-orders/${workOrder.id}`, payload)
-        if (resp.ok) { onUpdated(); return }
-        const data = await resp.json()
-        setError(data.detail || 'Update failed')
+        await apiPatch(`/execution/work-orders/${workOrder.id}`, payload)
+        onUpdated()
+        return
       } catch {
         setError('Network error — saving offline')
         await queueOffline(payload)
@@ -268,14 +258,15 @@ function WorkOrderDetailModal({
 
   const queueOffline = async (payload: Record<string, unknown>) => {
     await db.syncQueue.put({
-      id: uuidv4(),
-      operation_type: 'UPDATE',
-      entity_type: 'WORK_ORDER',
-      entity_id: workOrder.id,
+      operationUuid:   uuidv4(),
+      operationType:   'UPDATE',
+      entityType:      'WORK_ORDER',
+      entityId:        String(workOrder.id),
       payload,
-      device_timestamp: new Date().toISOString(),
-      retry_count: 0,
-      created_at: new Date().toISOString(),
+      deviceTimestamp: new Date().toISOString(),
+      retryCount:      0,
+      status:          'PENDING' as const,
+      createdAt:       new Date().toISOString(),
     })
   }
 

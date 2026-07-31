@@ -80,13 +80,13 @@ export function ProjectsScreen() {
               </div>
               <div className="flex-1 min-w-0">
                 <div className="font-medium text-slate-800">{p.name}</div>
-                <div className="text-xs text-slate-500 font-mono mt-0.5">{p.code} · {p.total_units} units</div>
+                <div className="text-xs text-slate-500 font-mono mt-0.5">{p.code} · {p.totalUnits} units</div>
               </div>
               <div className="flex items-center gap-3 shrink-0">
                 <div className="text-right">
-                  <div className="text-sm font-semibold text-slate-700">{(p.completion_pct ?? 0).toFixed(0)}%</div>
+                  <div className="text-sm font-semibold text-slate-700">{(p.completionPct ?? 0).toFixed(0)}%</div>
                   <div className="w-16 h-1.5 bg-slate-100 rounded-full mt-1">
-                    <div className="h-1.5 bg-indigo-500 rounded-full" style={{ width: `${p.completion_pct ?? 0}%` }} />
+                    <div className="h-1.5 bg-indigo-500 rounded-full" style={{ width: `${p.completionPct ?? 0}%` }} />
                   </div>
                 </div>
                 <ChevronRight size={16} className="text-slate-400" />

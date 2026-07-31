@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { apiClient } from '@/lib/client'
+import { apiGet, apiPost, apiPatch } from '@/lib/client'
 import { v4 as uuidv4 } from 'uuid'
 import { db } from '@/lib/db'
 import { useSyncStore } from '@/stores/syncStore'
@@ -56,12 +56,12 @@ export function QualityScreen() {
       const params = new URLSearchParams()
       if (filterSev) params.set('severity', filterSev)
       if (filterStatus) params.set('status', filterStatus)
-      const [rResp, tResp] = await Promise.all([
-        apiClient.get(`/quality/remarks?${params}`),
-        apiClient.get('/quality/templates'),
+      const [rData, tData] = await Promise.all([
+        apiGet<{ items: Remark[] }>(`/quality/remarks?${params}`),
+        apiGet<RemarkTemplate[]>('/quality/templates'),
       ])
-      if (rResp.ok) setRemarks((await rResp.json()).items)
-      if (tResp.ok) setTemplates(await tResp.json())
+      setRemarks(rData.items)
+      setTemplates(tData)
     } catch { /* offline */ }
     setLoading(false)
   }
@@ -69,8 +69,8 @@ export function QualityScreen() {
   useEffect(() => { load() }, [filterSev, filterStatus])
 
   const resolveRemark = async (id: string) => {
-    const resp = await apiClient.patch(`/quality/remarks/${id}`, { status: 'RESOLVED' })
-    if (resp.ok) load()
+    await apiPatch(`/quality/remarks/${id}`, { status: 'RESOLVED' })
+    load()
   }
 
   const stats = {
@@ -218,21 +218,21 @@ function CreateRemarkModal({
     }
 
     if (isOnline) {
-      const resp = await apiClient.post('/quality/remarks', payload)
-      if (resp.ok) { onCreated(); return }
-      const d = await resp.json()
-      setError(d.detail || 'Failed')
+      await apiPost('/quality/remarks', payload)
+      onCreated()
+      return
     } else {
       // Queue as sync operation
       await db.syncQueue.put({
-        id: uuidv4(),
-        operation_type: 'CREATE',
-        entity_type: 'REMARK',
-        entity_id: remarkId,
+        operationUuid:   uuidv4(),
+        operationType:   'CREATE',
+        entityType:      'REMARK',
+        entityId:        remarkId,
         payload,
-        device_timestamp: new Date().toISOString(),
-        retry_count: 0,
-        created_at: new Date().toISOString(),
+        deviceTimestamp: new Date().toISOString(),
+        retryCount:      0,
+        status:          'PENDING',
+        createdAt:       new Date().toISOString(),
       })
       onCreated()
     }
