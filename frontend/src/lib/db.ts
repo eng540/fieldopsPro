@@ -92,6 +92,7 @@ export interface SyncOperation {
   status: 'PENDING' | 'SENT' | 'ACKNOWLEDGED' | 'FAILED' | 'CONFLICT'
   retryCount: number
   errorMessage?: string
+  createdAt?: string
 }
 
 export interface LocalDecision {
