@@ -58,7 +58,7 @@ export async function encryptData<T>(
   const plaintext = new TextEncoder().encode(JSON.stringify(data))
 
   const ciphertext = await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv },
+    { name: 'AES-GCM', iv: iv as unknown as Uint8Array<ArrayBuffer> },
     key,
     plaintext
   )
@@ -75,7 +75,7 @@ export async function decryptData<T>(
   key: CryptoKey
 ): Promise<T> {
   const plaintext = await crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv },
+    { name: 'AES-GCM', iv: iv as unknown as Uint8Array<ArrayBuffer> },
     key,
     ciphertext
   )

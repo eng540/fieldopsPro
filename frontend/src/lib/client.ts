@@ -7,7 +7,7 @@ Constitutional (ADR-004):
 - Refresh token in memory (production: HttpOnly cookie)
 - 401 responses trigger silent refresh before retry
 - On refresh failure, calls logout() to clear state
-"""
+*/
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
