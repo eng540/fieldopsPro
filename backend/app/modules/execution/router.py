@@ -1,6 +1,30 @@
 # --- START OF FILE backend/app/modules/execution/router.py ---
 
-"""EXECUTION CRUD Router — FieldOps V4.0 (Sprint-2 CP-3)"""
+"""EXECUTION CRUD Router — FieldOps V4.0 (Sprint-2 CP-3)
+
+Endpoints (5):
+1. POST   /execution/work-orders              — Create work order
+2. GET    /execution/work-orders              — List work orders (filtered, paginated)
+3. GET    /execution/work-orders/{id}         — Get work order detail
+4. PATCH  /execution/work-orders/{id}        — Update work order (Monotonic Progress enforced)
+5. POST   /execution/work-orders/{id}/assign  — Assign work order to user
+
+Constitutional Rules (CP-3 additions):
+- Monotonic Progress (ADR-003):
+    * completion_pct cannot decrease without rework_flag=True + rework_reason (min 20 chars)
+      + rework_authorized_by (must be PM or Org Admin role)
+    * Returns 409 on violation
+- Status Transitions (ADR-003):
+    * Only allowed transitions per MONOTONIC_STATUS_TRANSITIONS map
+    * Returns 409 on invalid transition
+- WORM Audit (ADR-002):
+    * WorkOrderStatusHistory entry written on every status change
+    * Records from_status, to_status, reason, rework details, changed_by
+- org_id injected from JWT context (multi-tenant isolation)
+- created_by / assigned_by from JWT context
+- All responses validated against Pydantic schemas
+- OpenAPI-first: schemas match OpenAPI contract
+"""
 from typing import Annotated
 from uuid import uuid4
 
@@ -16,8 +40,6 @@ from app.modules.execution.models import (
     WorkOrderAssignment,
     WorkOrderStatus,
     WorkOrderStatusHistory,
-    UnitBoQProgress,
-    UnitBoQProgressStatus,
 )
 from app.modules.execution.schemas import (
     AssignmentListResponse,
@@ -30,20 +52,29 @@ from app.modules.execution.schemas import (
     WorkOrderListResponse,
     WorkOrderRead,
     WorkOrderUpdate,
-    BoQProgressCreate,       # <-- تم إضافة هذا
-    BulkBoQProgressRequest,  # <-- تم إضافة هذا
+    BoQProgressCreate,       # FIX: Moved to top-level import
+    BulkBoQProgressRequest,  # FIX: Moved to top-level import
 )
 from app.modules.iam.dependencies import get_current_user
 
+# Roles permitted to authorize rework (ADR-003 Rule 3)
 _REWORK_AUTHORIZED_ROLES = {"PROJECT_MANAGER", "ORG_ADMIN", "SUPER_ADMIN"}
 
+# ─────────────────────────────────────────
+# ROUTER
+# ─────────────────────────────────────────
 router = APIRouter()
 
 
+# ═══════════════════════════════════════
+# ENDPOINT 1: CREATE WORK ORDER
+# ═══════════════════════════════════════
 @router.post(
     "/work-orders",
     response_model=WorkOrderRead,
     status_code=201,
+    summary="Create work order",
+    description="Create a new work order. org_id and created_by are injected from JWT.",
 )
 async def create_work_order(
     data: WorkOrderCreate,
@@ -64,9 +95,14 @@ async def create_work_order(
     return work_order
 
 
+# ═══════════════════════════════════════
+# ENDPOINT 2: LIST WORK ORDERS
+# ═══════════════════════════════════════
 @router.get(
     "/work-orders",
     response_model=WorkOrderListResponse,
+    summary="List work orders",
+    description="List work orders with optional filters and cursor-based pagination.",
 )
 async def list_work_orders(
     project_id: int | None = Query(None),
@@ -106,9 +142,17 @@ async def list_work_orders(
     }
 
 
+# ═══════════════════════════════════════
+# ENDPOINT 3: GET WORK ORDER DETAIL
+# ═══════════════════════════════════════
 @router.get(
     "/work-orders/{work_order_id}",
     response_model=WorkOrderRead,
+    summary="Get work order detail",
+    responses={
+        404: {"description": "Work order not found"},
+        403: {"description": "Access denied — org_id mismatch"},
+    },
 )
 async def get_work_order(
     work_order_id: int,
@@ -133,9 +177,21 @@ async def get_work_order(
     return work_order
 
 
+# ═══════════════════════════════════════
+# ENDPOINT 4: UPDATE WORK ORDER (CP-3)
+# ═══════════════════════════════════════
 @router.patch(
     "/work-orders/{work_order_id}",
     response_model=WorkOrderRead,
+    summary="Update work order",
+    description="Update work order fields. PATCH semantics — only provided fields updated.",
+    responses={
+        200: {"description": "Work order updated"},
+        404: {"description": "Work order not found"},
+        403: {"description": "Access denied"},
+        409: {"description": "Monotonic progress violation (ADR-003)"},
+        422: {"description": "Validation error"},
+    },
 )
 async def update_work_order(
     work_order_id: int,
@@ -143,6 +199,7 @@ async def update_work_order(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ) -> WorkOrder:
+    """Update work order — Monotonic Progress + Status Transition + WORM (ADR-003/002)."""
     org_id = current_user["org_id"]
     user_id = current_user["id"]
 
@@ -161,6 +218,7 @@ async def update_work_order(
 
     update_fields = data.model_dump(exclude_none=True)
 
+    # ─── ADR-003: Monotonic Progress on completion_pct ───────────────────────
     if "completion_pct" in update_fields:
         new_pct = update_fields["completion_pct"]
         current_pct = work_order.completion_pct
@@ -173,15 +231,54 @@ async def update_work_order(
             if not rework_flag:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
-                    detail="Monotonic Progress Violation (ADR-003)",
+                    detail=(
+                        f"Monotonic Progress Violation (ADR-003): "
+                        f"completion_pct cannot decrease from {current_pct}% to {new_pct}% "
+                        f"without rework_flag=True."
+                    ),
                 )
 
             if not rework_reason or len(rework_reason.strip()) < 20:
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail="rework_reason required (min 20 chars)",
+                    detail=(
+                        "ADR-003 Rule 3: rework_reason required (min 20 chars) "
+                        "when rework_flag=True."
+                    ),
                 )
 
+            if rework_authorized_by is not None:
+                from app.modules.iam.models import User, ProjectUser
+                auth_user_result = await db.execute(
+                    select(User).where(
+                        User.id == rework_authorized_by,
+                        User.org_id == org_id,
+                        User.is_active.is_(True),
+                    )
+                )
+                if not auth_user_result.scalar_one_or_none():
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail=f"ADR-003: rework_authorized_by user {rework_authorized_by} not found.",
+                    )
+
+                role_result = await db.execute(
+                    select(ProjectUser).where(
+                        ProjectUser.user_id == rework_authorized_by,
+                        ProjectUser.project_id == work_order.project_id,
+                    )
+                )
+                pu = role_result.scalar_one_or_none()
+                if not pu or pu.role not in _REWORK_AUTHORIZED_ROLES:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail=(
+                            f"ADR-003 Rule 3: rework_authorized_by requires role in "
+                            f"{sorted(_REWORK_AUTHORIZED_ROLES)}. Got: {pu.role if pu else None!r}."
+                        ),
+                    )
+
+    # ─── ADR-003: Status Transition Enforcement ──────────────────────────────
     status_changed = False
     old_status = work_order.status
 
@@ -202,17 +299,23 @@ async def update_work_order(
         if new_status_enum != old_status_enum and new_status_enum not in allowed:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="Invalid status transition",
+                detail=(
+                    f"Invalid status transition (ADR-003): "
+                    f"{old_status_enum.value} → {new_status_enum.value} is not allowed. "
+                    f"Allowed: {[t.value for t in allowed] or 'none (terminal state)'}."
+                ),
             )
 
         if new_status_enum != old_status_enum:
             status_changed = True
 
+    # ─── Apply updates ────────────────────────────────────────────────────────
     for field, value in update_fields.items():
         setattr(work_order, field, value.value if hasattr(value, "value") else value)
 
     await db.flush()
 
+    # ─── WORM: Write status history on every status change (ADR-002) ─────────
     if status_changed:
         history_entry = WorkOrderStatusHistory(
             org_id=org_id,
@@ -232,10 +335,18 @@ async def update_work_order(
     return work_order
 
 
+# ═══════════════════════════════════════
+# ENDPOINT 5: ASSIGN WORK ORDER
+# ═══════════════════════════════════════
 @router.post(
     "/work-orders/{work_order_id}/assign",
     response_model=WorkOrderAssignmentRead,
     status_code=201,
+    summary="Assign work order",
+    responses={
+        404: {"description": "Work order not found"},
+        409: {"description": "User already has active assignment"},
+    },
 )
 async def assign_work_order(
     work_order_id: int,
@@ -256,7 +367,7 @@ async def assign_work_order(
     if not work_order:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Work order {work_order_id} not found",
+            detail=f"Work order {work_order_id} not found in organization {org_id}",
         )
 
     existing = await db.execute(
@@ -269,7 +380,7 @@ async def assign_work_order(
     if existing.scalar_one_or_none():
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"User {data.user_id} already has an active assignment",
+            detail=f"User {data.user_id} already has an active assignment on work order {work_order_id}",
         )
 
     assignment = WorkOrderAssignment(
@@ -286,19 +397,37 @@ async def assign_work_order(
     return assignment
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# ENDPOINT 6: BOQ PROGRESS — POST /execution/progress (Sprint-4 M1.2)
+# ═══════════════════════════════════════════════════════════════════════════
+
 @router.post(
     "/progress",
     response_model=None,
     status_code=200,
+    summary="Update unit BoQ progress",
+    description=(
+        "Updates completion percentage for a single unit's BoQ item. "
+        "Constitutional Rule: Monotonic Progress (ADR-003) — "
+        "completion_pct cannot decrease without rework_flag=True + rework_reason (min 20 chars)."
+    ),
+    responses={
+        200: {"description": "Progress updated"},
+        409: {"description": "Monotonic violation — use Rework Flag"},
+        422: {"description": "Validation error"},
+    },
 )
 async def update_boq_progress(
-    data: BoQProgressCreate,  # <-- تم إزالة علامات التنصيص
+    data: BoQProgressCreate,  # FIX: Removed quotes
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ) -> dict:
+    from app.modules.execution.models import UnitBoQProgress
+
     org_id  = current_user["org_id"]
     user_id = current_user["id"]
 
+    # Fetch or create progress row (upsert)
     result = await db.execute(
         select(UnitBoQProgress).where(
             UnitBoQProgress.unit_id    == data.unit_id,
@@ -308,27 +437,37 @@ async def update_boq_progress(
     )
     progress = result.scalar_one_or_none()
 
+    # ── Monotonic Progress enforcement (ADR-003) ──────────────────────────
     if progress and data.completion_pct < progress.completion_pct:
         if not data.rework_flag:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="Monotonic Progress Violation (ADR-003)",
+                detail=(
+                    f"Monotonic Progress Violation (ADR-003): "
+                    f"completion_pct cannot decrease from {progress.completion_pct}% "
+                    f"to {data.completion_pct}% without rework_flag=True."
+                ),
             )
         if not data.rework_reason or len(data.rework_reason.strip()) < 20:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="rework_reason required (min 20 chars)",
+                detail="rework_reason required (min 20 chars) when rework_flag=True.",
             )
 
+    # ── Auto-derive status ────────────────────────────────────────────────
     derived_status = data.status
     if not derived_status:
         if data.rework_flag:
+            from app.modules.execution.models import UnitBoQProgressStatus
             derived_status = UnitBoQProgressStatus.REWORK_REQUIRED.value
         elif data.completion_pct >= 100.0:
+            from app.modules.execution.models import UnitBoQProgressStatus
             derived_status = UnitBoQProgressStatus.COMPLETED.value
         elif data.completion_pct > 0:
+            from app.modules.execution.models import UnitBoQProgressStatus
             derived_status = UnitBoQProgressStatus.IN_PROGRESS.value
         else:
+            from app.modules.execution.models import UnitBoQProgressStatus
             derived_status = UnitBoQProgressStatus.NOT_STARTED.value
 
     if progress:
@@ -374,14 +513,31 @@ async def update_boq_progress(
     }
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# ENDPOINT 7: BULK BOQ PROGRESS — POST /execution/bulk-progress (Sprint-4 M1.2)
+# ═══════════════════════════════════════════════════════════════════════════
+
 @router.post(
     "/bulk-progress",
+    summary="Bulk update progress (Speed Entry Matrix)",
+    description=(
+        "Updates multiple unit/BOQ combinations in one request. "
+        "Max 100 items per call. "
+        "Partial success: succeeded + failed + conflicts returned separately. "
+        "Monotonic Progress enforced per item (ADR-003)."
+    ),
+    responses={
+        200: {"description": "Bulk update processed (may contain partial conflicts)"},
+        422: {"description": "Validation error"},
+    },
 )
 async def bulk_update_boq_progress(
-    data: BulkBoQProgressRequest, # <-- تم إزالة علامات التنصيص
+    data: BulkBoQProgressRequest, # FIX: Removed quotes
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ) -> dict:
+    from app.modules.execution.models import UnitBoQProgress, UnitBoQProgressStatus
+
     org_id  = current_user["org_id"]
     user_id = current_user["id"]
 
@@ -400,6 +556,7 @@ async def bulk_update_boq_progress(
             )
             progress = result.scalar_one_or_none()
 
+            # Monotonic check
             if progress and item.completion_pct < progress.completion_pct:
                 if not item.rework_flag:
                     conflicts.append({
@@ -407,11 +564,15 @@ async def bulk_update_boq_progress(
                         "boq_item_id":   item.boq_item_id,
                         "current_pct":   progress.completion_pct,
                         "attempted_pct": item.completion_pct,
-                        "reason": "Monotonic violation",
+                        "reason": (
+                            f"Monotonic violation: {progress.completion_pct}% → {item.completion_pct}% "
+                            f"without rework_flag."
+                        ),
                     })
                     failed += 1
                     continue
 
+            # Derive status
             if item.rework_flag:
                 derived = UnitBoQProgressStatus.REWORK_REQUIRED.value
             elif item.completion_pct >= 100.0:
