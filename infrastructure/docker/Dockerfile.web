@@ -1,3 +1,4 @@
+# --- START OF FILE infrastructure/docker/Dockerfile.web ---
 # syntax=docker/dockerfile:1
 # FieldOps V4.0 — Next.js Frontend (Production)
 FROM node:20-alpine AS builder
@@ -9,7 +10,7 @@ RUN npm install
 COPY . .
 ARG NEXT_PUBLIC_API_URL
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
-RUN npm run build
+RUN npx next build
 
 # ─────────────────────────────────────────
 # Production stage — Standalone Next.js
@@ -18,17 +19,19 @@ FROM node:20-alpine AS production
 
 WORKDIR /app
 ENV NODE_ENV=production
-
-COPY --from=builder /app/.next/standalone ./
-COPY --from=builder /app/.next/static ./.next/static
-COPY --from=builder /app/public ./public
-
-# Non-root user for security
-RUN addgroup -g 1001 -S nodejs && adduser -S nextjs -u 1001
-USER nextjs
-
-EXPOSE 3000
 ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
+
+RUN addgroup -g 1001 -S nodejs && adduser -S nextjs -u 1001
+
+# Copy standalone output
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+# Copy static files to the correct location
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+# Copy public folder
+COPY --from=builder --chown=nextjs:nodejs /app/public ./public
+
+USER nextjs
+EXPOSE 3000
 
 CMD ["node", "server.js"]
