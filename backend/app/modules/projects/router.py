@@ -14,7 +14,7 @@ Endpoints (8):
 """
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import selectinload  # FIX: Added to load nested relations
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -48,6 +48,7 @@ async def create_project(
     return project
 
 
+# FIX: Added dummy endpoint to prevent 422 error from frontend
 @router.get("/dictionaries")
 async def list_dictionaries():
     """Dummy endpoint to prevent 422 errors from frontend."""
@@ -64,6 +65,7 @@ async def list_projects(
 ) -> dict:
     org_id = current_user["org_id"]
     
+    # FIX: Added options to load nested units and boq_items
     query = select(Project).where(Project.org_id == org_id, Project.is_active.is_(True)).options(
         selectinload(Project.units).selectinload(ProjectUnit.boq_items)
     )
@@ -77,6 +79,7 @@ async def list_projects(
     total = (await db.execute(count_query)).scalar_one()
     items = (await db.execute(query.order_by(Project.created_at.desc()).offset((page-1)*page_size).limit(page_size))).scalars().all()
     
+    # FIX: Initialize empty assignments to satisfy frontend schema
     for item in items:
         item.assignments = []
         
@@ -90,6 +93,7 @@ async def get_project(
     current_user: dict = Depends(get_current_user),
 ) -> Project:
     org_id = current_user["org_id"]
+    # FIX: Added options to load nested units and boq_items
     project = (await db.execute(
         select(Project).where(Project.id == project_id, Project.org_id == org_id).options(
             selectinload(Project.units).selectinload(ProjectUnit.boq_items)
@@ -97,6 +101,8 @@ async def get_project(
     )).scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=404, detail=f"Project {project_id} not found.")
+    
+    # FIX: Initialize empty assignments to satisfy frontend schema
     project.assignments = []
     return project
 
@@ -116,6 +122,8 @@ async def update_project(
         setattr(project, k, v)
     await db.flush()
     await db.refresh(project)
+    
+    # FIX: Initialize empty assignments to satisfy frontend schema
     project.assignments = []
     return project
 
@@ -146,6 +154,7 @@ async def list_units(
     current_user: dict = Depends(get_current_user),
 ) -> dict:
     org_id = current_user["org_id"]
+    # FIX: Added options to load nested boq_items
     items = (await db.execute(
         select(ProjectUnit).where(ProjectUnit.project_id == project_id, ProjectUnit.org_id == org_id).options(
             selectinload(ProjectUnit.boq_items)
