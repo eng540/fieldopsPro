@@ -1,118 +1,117 @@
-# --- START OF FILE backend/app/modules/projects/schemas.py ---
+# --- START OF FILE backend/app/modules/projects/models.py ---
 
-"""Projects Pydantic Schemas — FieldOps V4.0"""
+"""PROJECTS Models — FieldOps V4.0
+
+Models:
+- Project: Top-level construction project per org
+- ProjectUnit: Physical unit within a project (apartment, floor, block)
+- BOQItem: Bill of Quantities line item per unit
+
+Constitutional: Every model MUST include org_id.
+"""
 from __future__ import annotations
-from datetime import datetime
-from typing import Any
-from pydantic import BaseModel, Field, field_validator
+import enum
+
+from sqlalchemy import (
+    Boolean, DateTime, Float, ForeignKey, Index,
+    Integer, JSON, String, Text, UniqueConstraint,
+)
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.sql import func
+
+from app.core.database import Base
 
 
-class ProjectCreate(BaseModel):
-    name: str = Field(min_length=2, max_length=255)
-    code: str = Field(min_length=1, max_length=50)
-    description: str | None = None
-    location: str | None = None
-    start_date: str | None = None
-    end_date: str | None = None
-
-    @field_validator("code")
-    @classmethod
-    def code_uppercase(cls, v: str) -> str:
-        return v.upper().strip()
+class ProjectStatus(str, enum.Enum):
+    PLANNING   = "PLANNING"
+    ACTIVE     = "ACTIVE"
+    ON_HOLD    = "ON_HOLD"
+    COMPLETED  = "COMPLETED"
+    CANCELLED  = "CANCELLED"
 
 
-# FIX: Moved BOQItem schemas up to resolve Pydantic ForwardRef issues
-class BOQItemCreate(BaseModel):
-    trade: str = Field(min_length=1, max_length=100)
-    description: str = Field(min_length=1)
-    quantity: float = Field(ge=0)
-    unit_of_measure: str = Field(default="item", max_length=50)
+class UnitStatus(str, enum.Enum):
+    PENDING    = "PENDING"
+    IN_PROGRESS = "IN_PROGRESS"
+    COMPLETED  = "COMPLETED"
+    SNAGGED    = "SNAGGED"
 
 
-class BOQItemRead(BaseModel):
-    id: int
-    org_id: int
-    unit_id: int
-    trade: str
-    description: str
-    quantity: float
-    unit_of_measure: str
-    completion_pct: float
-    is_active: bool
-    created_at: datetime
-    model_config = {"from_attributes": True}
+class Project(Base):
+    __tablename__ = "projects"
+
+    id: Mapped[int]         = mapped_column(Integer, primary_key=True, autoincrement=True)
+    org_id: Mapped[int]     = mapped_column(Integer, ForeignKey("organizations.id"), nullable=False)
+    name: Mapped[str]       = mapped_column(String(255), nullable=False)
+    code: Mapped[str]       = mapped_column(String(50), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str]     = mapped_column(String(30), nullable=False, default=ProjectStatus.PLANNING.value)
+    location: Mapped[str | None]    = mapped_column(String(500), nullable=True)
+    start_date: Mapped[str | None]  = mapped_column(String(20), nullable=True)
+    end_date: Mapped[str | None]    = mapped_column(String(20), nullable=True)
+    total_units: Mapped[int]        = mapped_column(Integer, nullable=False, default=0)
+    completion_pct: Mapped[float]   = mapped_column(Float, nullable=False, default=0.0)
+    created_by: Mapped[int]         = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    is_active: Mapped[bool]         = mapped_column(Boolean, nullable=False, default=True)
+    extra_data: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[object]      = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[object]      = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    units: Mapped[list[ProjectUnit]] = relationship("ProjectUnit", back_populates="project", lazy="select")
+
+    __table_args__ = (
+        UniqueConstraint("org_id", "code", name="uq_projects_org_code"),
+        Index("ix_projects_org_id", "org_id"),
+        Index("ix_projects_status", "status"),
+    )
 
 
-class UnitCreate(BaseModel):
-    name: str = Field(min_length=1, max_length=255)
-    code: str = Field(min_length=1, max_length=50)
-    unit_type: str | None = None
-    floor: int | None = None
-    area_sqm: float | None = None
+class ProjectUnit(Base):
+    __tablename__ = "project_units"
 
-    @field_validator("code")
-    @classmethod
-    def code_uppercase(cls, v: str) -> str:
-        return v.upper().strip()
+    id: Mapped[int]          = mapped_column(Integer, primary_key=True, autoincrement=True)
+    org_id: Mapped[int]      = mapped_column(Integer, ForeignKey("organizations.id"), nullable=False)
+    project_id: Mapped[int]  = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    name: Mapped[str]        = mapped_column(String(255), nullable=False)
+    code: Mapped[str]        = mapped_column(String(50), nullable=False)
+    unit_type: Mapped[str | None]    = mapped_column(String(100), nullable=True)
+    floor: Mapped[int | None]        = mapped_column(Integer, nullable=True)
+    area_sqm: Mapped[float | None]   = mapped_column(Float, nullable=True)
+    status: Mapped[str]              = mapped_column(String(30), nullable=False, default=UnitStatus.PENDING.value)
+    completion_pct: Mapped[float]    = mapped_column(Float, nullable=False, default=0.0)
+    is_active: Mapped[bool]          = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[object]       = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[object]       = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
+    project: Mapped[Project] = relationship("Project", back_populates="units")
+    boq_items: Mapped[list[BOQItem]] = relationship("BOQItem", back_populates="unit", lazy="select")
 
-class UnitRead(BaseModel):
-    id: int
-    org_id: int
-    project_id: int
-    name: str
-    code: str
-    unit_type: str | None
-    floor: int | None
-    area_sqm: float | None
-    status: str
-    completion_pct: float
-    is_active: bool
-    created_at: datetime
-    updated_at: datetime
-    # FIX: Added boq_items array to prevent frontend crash
-    boq_items: list[BOQItemRead] = Field(default_factory=list)
-    model_config = {"from_attributes": True}
+    __table_args__ = (
+        UniqueConstraint("project_id", "code", name="uq_units_project_code"),
+        Index("ix_project_units_org_id", "org_id"),
+        Index("ix_project_units_project_id", "project_id"),
+    )
 
 
-class UnitListResponse(BaseModel):
-    items: list[UnitRead]
-    total: int
+class BOQItem(Base):
+    """Bill of Quantities item — tracks progress per trade per unit."""
+    __tablename__ = "boq_items"
 
+    id: Mapped[int]         = mapped_column(Integer, primary_key=True, autoincrement=True)
+    org_id: Mapped[int]     = mapped_column(Integer, ForeignKey("organizations.id"), nullable=False)
+    unit_id: Mapped[int]    = mapped_column(Integer, ForeignKey("project_units.id"), nullable=False)
+    trade: Mapped[str]      = mapped_column(String(100), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    quantity: Mapped[float]  = mapped_column(Float, nullable=False, default=0.0)
+    unit_of_measure: Mapped[str] = mapped_column(String(50), nullable=False, default="item")
+    completion_pct: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    is_active: Mapped[bool]  = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
-class ProjectRead(BaseModel):
-    id: int
-    org_id: int
-    name: str
-    code: str
-    description: str | None
-    status: str
-    location: str | None
-    start_date: str | None
-    end_date: str | None
-    total_units: int
-    completion_pct: float
-    is_active: bool
-    created_at: datetime
-    updated_at: datetime
-    # FIX: Added units and assignments arrays to prevent frontend crash
-    units: list[UnitRead] = Field(default_factory=list)
-    assignments: list[Any] = Field(default_factory=list)
-    model_config = {"from_attributes": True}
+    unit: Mapped[ProjectUnit] = relationship("ProjectUnit", back_populates="boq_items")
 
-
-class ProjectUpdate(BaseModel):
-    name: str | None = Field(default=None, min_length=2, max_length=255)
-    description: str | None = None
-    status: str | None = None
-    location: str | None = None
-    start_date: str | None = None
-    end_date: str | None = None
-
-
-class ProjectListResponse(BaseModel):
-    items: list[ProjectRead]
-    total: int
-    page: int
-    page_size: int
-    has_more: bool
+    __table_args__ = (
+        Index("ix_boq_items_org_id", "org_id"),
+        Index("ix_boq_items_unit_id", "unit_id"),
+    )
