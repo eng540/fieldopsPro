@@ -1,9 +1,8 @@
-// FieldOps V4 — Login Screen
-// Sprint 5 Phase 3 — Enterprise Authentication UI
-
+// --- START OF FILE src/components/fieldops/LoginScreen.tsx ---
 'use client'
 
 import React, { useState } from 'react'
+import { useRouter } from 'next/navigation'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -18,6 +17,7 @@ import {
 import { useAuthStore } from '@/lib/auth-store'
 
 export function LoginScreen() {
+  const router = useRouter()
   const { login, isLoading, error, clearError } = useAuthStore()
 
   const [email, setEmail] = useState('admin@fieldops.sa')
@@ -28,6 +28,8 @@ export function LoginScreen() {
     e.preventDefault()
     try {
       await login(email, password)
+      // التوجيه إلى الصفحة الرئيسية بعد نجاح الدخول
+      router.push('/')
     } catch {
       // Error is handled in store
     }
@@ -197,24 +199,6 @@ export function LoginScreen() {
             </div>
           </CardContent>
         </Card>
-
-        {/* Footer */}
-        <div className="mt-6 text-center">
-          <div className="flex items-center justify-center gap-4 text-xs text-gray-400">
-            <div className="flex items-center gap-1">
-              <Shield className="w-3 h-3" />
-              مشفر
-            </div>
-            <div className="flex items-center gap-1">
-              <Wifi className="w-3 h-3" />
-              يعمل أوفلاين
-            </div>
-            <div className="flex items-center gap-1">
-              <CheckCircle2 className="w-3 h-3" />
-              v4.0
-            </div>
-          </div>
-        </div>
       </div>
     </div>
   )
