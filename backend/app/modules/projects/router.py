@@ -1,16 +1,20 @@
+# --- START OF FILE backend/app/modules/projects/router.py ---
+
 """PROJECTS Router — FieldOps V4.0
 
-Endpoints (7):
+Endpoints (8):
 1. POST   /projects                          — Create project
 2. GET    /projects                          — List projects (paginated)
-3. GET    /projects/{id}                     — Get project detail
-4. PATCH  /projects/{id}                     — Update project
-5. POST   /projects/{id}/units               — Add unit to project
-6. GET    /projects/{id}/units               — List units
-7. POST   /projects/{id}/units/{uid}/boq     — Add BOQ item
+3. GET    /projects/dictionaries             — Dummy endpoint for frontend
+4. GET    /projects/{id}                     — Get project detail
+5. PATCH  /projects/{id}                     — Update project
+6. POST   /projects/{id}/units               — Add unit to project
+7. GET    /projects/{id}/units               — List units
+8. POST   /projects/{id}/units/{uid}/boq     — Add BOQ item
 """
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -44,6 +48,12 @@ async def create_project(
     return project
 
 
+@router.get("/dictionaries")
+async def list_dictionaries():
+    """Dummy endpoint to prevent 422 errors from frontend."""
+    return {"items": []}
+
+
 @router.get("", response_model=ProjectListResponse)
 async def list_projects(
     page: int = Query(1, ge=1),
@@ -53,13 +63,23 @@ async def list_projects(
     current_user: dict = Depends(get_current_user),
 ) -> dict:
     org_id = current_user["org_id"]
-    q = select(Project).where(Project.org_id == org_id, Project.is_active.is_(True))
-    cq = select(func.count()).select_from(Project).where(Project.org_id == org_id, Project.is_active.is_(True))
+    
+    query = select(Project).where(Project.org_id == org_id, Project.is_active.is_(True)).options(
+        selectinload(Project.units).selectinload(ProjectUnit.boq_items)
+    )
+    
+    count_query = select(func.count()).select_from(Project).where(Project.org_id == org_id, Project.is_active.is_(True))
+    
     if status_filter:
-        q = q.where(Project.status == status_filter)
-        cq = cq.where(Project.status == status_filter)
-    total = (await db.execute(cq)).scalar_one()
-    items = (await db.execute(q.order_by(Project.created_at.desc()).offset((page-1)*page_size).limit(page_size))).scalars().all()
+        query = query.where(Project.status == status_filter)
+        count_query = count_query.where(Project.status == status_filter)
+        
+    total = (await db.execute(count_query)).scalar_one()
+    items = (await db.execute(query.order_by(Project.created_at.desc()).offset((page-1)*page_size).limit(page_size))).scalars().all()
+    
+    for item in items:
+        item.assignments = []
+        
     return {"items": items, "total": total, "page": page, "page_size": page_size, "has_more": (page-1)*page_size+len(items) < total}
 
 
@@ -70,9 +90,14 @@ async def get_project(
     current_user: dict = Depends(get_current_user),
 ) -> Project:
     org_id = current_user["org_id"]
-    project = (await db.execute(select(Project).where(Project.id == project_id, Project.org_id == org_id))).scalar_one_or_none()
+    project = (await db.execute(
+        select(Project).where(Project.id == project_id, Project.org_id == org_id).options(
+            selectinload(Project.units).selectinload(ProjectUnit.boq_items)
+        )
+    )).scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=404, detail=f"Project {project_id} not found.")
+    project.assignments = []
     return project
 
 
@@ -91,6 +116,7 @@ async def update_project(
         setattr(project, k, v)
     await db.flush()
     await db.refresh(project)
+    project.assignments = []
     return project
 
 
@@ -120,7 +146,11 @@ async def list_units(
     current_user: dict = Depends(get_current_user),
 ) -> dict:
     org_id = current_user["org_id"]
-    items = (await db.execute(select(ProjectUnit).where(ProjectUnit.project_id == project_id, ProjectUnit.org_id == org_id))).scalars().all()
+    items = (await db.execute(
+        select(ProjectUnit).where(ProjectUnit.project_id == project_id, ProjectUnit.org_id == org_id).options(
+            selectinload(ProjectUnit.boq_items)
+        )
+    )).scalars().all()
     return {"items": items, "total": len(items)}
 
 
