@@ -23,7 +23,6 @@ Tables with RLS (org_id-scoped):
 - unit_boq_progress
 - remarks, remark_templates
 - governance_decisions
-- report_templates
 
 Tables WITHOUT RLS (system/root-level):
 - organizations (root entity — needed for login)
@@ -42,6 +41,7 @@ depends_on = None
 
 
 # All tables that have org_id and should be RLS-protected
+# FIX: Removed "report_templates" as it does not exist in the schema
 _RLS_TABLES = [
     "users",
     "roles",
@@ -58,7 +58,6 @@ _RLS_TABLES = [
     "remarks",
     "remark_templates",
     "governance_decisions",
-    "report_templates",
 ]
 
 
