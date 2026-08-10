@@ -191,7 +191,6 @@ export function onSyncStatusChange(listener: (status: SyncStatus) => void): () =
 
 // ============================================================
 // processSyncQueue — Pushes pending operations to FastAPI /sync/push
-// Payload matches SyncPushRequest from openapi.yaml
 // ============================================================
 
 export async function processSyncQueue(): Promise<{
@@ -212,13 +211,7 @@ export async function processSyncQueue(): Promise<{
   syncErrors = []
   let processed = 0
   let failed = 0
-  const allConflicts: Array<{
-    operation_uuid: string
-    conflict_type: string
-    server_value: Record<string, unknown>
-    client_value: Record<string, unknown>
-    resolution_hint: string
-  }> = []
+  const allConflicts: Array<any> = []
 
   try {
     const pendingItems = await getPendingSyncItems()
@@ -229,7 +222,6 @@ export async function processSyncQueue(): Promise<{
       return { processed: 0, failed: 0, remaining: 0, conflicts: [] }
     }
 
-    // Build SyncPushRequest payload matching openapi.yaml
     const operations = pendingItems.map(item => {
       const payload = JSON.parse(item.payload)
       return {
@@ -255,7 +247,6 @@ export async function processSyncQueue(): Promise<{
     if (res.ok || res.status === 207) {
       const data = await res.json()
 
-      // Mark processed items as COMPLETED
       for (const uuid of (data.processed || [])) {
         const item = pendingItems.find(i => i.operationUuid === uuid)
         if (item?.id) {
@@ -267,15 +258,12 @@ export async function processSyncQueue(): Promise<{
         }
       }
 
-      // Handle conflicts (207 Multi-Status)
-      // Store server_value from each conflict for the ConflictResolutionPanel
       for (const conflict of (data.conflicts || [])) {
         const item = pendingItems.find(i => i.operationUuid === conflict.operation_uuid)
         if (item?.id) {
           await updateSyncQueueItem(item.id, {
             status: 'CONFLICT',
             lastError: `${conflict.conflict_type}: ${conflict.resolution_hint}`,
-            // Store server data as JSON for the merge dialog
             serverData: conflict.server_value || null,
           })
           failed++
@@ -284,10 +272,8 @@ export async function processSyncQueue(): Promise<{
         syncErrors.push(`${conflict.conflict_type}: ${conflict.resolution_hint}`)
       }
 
-      // Clean up completed items
       await clearCompletedSyncItems()
     } else if (res.status === 409) {
-      // All blocked by governance
       const data = await res.json()
       for (const conflict of (data.conflicts || [])) {
         const item = pendingItems.find(i => i.operationUuid === conflict.operation_uuid)
@@ -302,7 +288,6 @@ export async function processSyncQueue(): Promise<{
         syncErrors.push(`BLOCKED: ${conflict.resolution_hint}`)
       }
     } else {
-      // Server error — retry later
       for (const item of pendingItems) {
         await updateSyncQueueItem(item.id!, {
           status: 'PENDING',
@@ -349,7 +334,6 @@ export async function fullDataSync(orgId: string): Promise<{
   try {
     const token = getAccessToken()
 
-    // Pull from /sync/pull
     const pullRes = await fetch(`${API_BASE}/sync/pull`, {
       method: 'POST',
       headers: {
@@ -357,13 +341,12 @@ export async function fullDataSync(orgId: string): Promise<{
         ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
       },
       body: JSON.stringify({
-        last_sync_version: null, // Full sync
+        last_sync_version: null, 
       }),
     })
 
     if (pullRes.ok) {
       const pullData = await pullRes.json()
-      // Cache work orders from pull bundle to local DB
       if (pullData.bundle?.work_orders) {
         for (const wo of pullData.bundle.work_orders) {
           await db.boqProgress.put({
@@ -386,7 +369,6 @@ export async function fullDataSync(orgId: string): Promise<{
       }
     } else errors.push('sync/pull: ' + String(pullRes.status))
 
-    // Pull users, remarks, audit logs from FastAPI
     const [userRes, remarkRes, auditRes] = await Promise.all([
       apiRequest<{ items: unknown[] }>(`/auth/users`),
       apiRequest<{ items: unknown[] }>(`/quality/remarks`),
@@ -402,7 +384,6 @@ export async function fullDataSync(orgId: string): Promise<{
     if (auditRes.success && auditRes.data) synced.auditLogs = (auditRes.data as any).length || 0
     else errors.push('audit: ' + (auditRes.error || 'unknown'))
 
-    // Push pending changes
     await processSyncQueue()
 
     return { success: errors.length === 0, synced, errors }
@@ -417,7 +398,7 @@ export async function fullDataSync(orgId: string): Promise<{
 }
 
 // ============================================================
-// Hybrid Data Access — Online First, Offline Fallback
+// Hybrid Data Access — SAFE MAPPING LAYER (Bulletproof Fix)
 // ============================================================
 
 export async function getProjectsHybrid(orgId: string): Promise<{
@@ -429,13 +410,44 @@ export async function getProjectsHybrid(orgId: string): Promise<{
       if (res.success && res.data) {
         let items = res.data.projects || res.data.items || res.data;
         if (!Array.isArray(items)) items = [];
-        // FIX: Ensure units and assignments are arrays to prevent frontend crash
-        items = items.map((p: any) => ({
-          ...p,
-          units: Array.isArray(p.units) ? p.units : [],
+        
+        // SAFE MAPPING: Convert snake_case to camelCase and ensure arrays exist
+        const mappedItems = items.map((p: any) => ({
+          id: String(p.id),
+          orgId: String(p.org_id || p.orgId || ''),
+          name: p.name || '',
+          code: p.code || '',
+          status: p.status || 'NOT_STARTED',
+          location: p.location || null,
+          totalUnits: p.total_units || p.totalUnits || 0,
+          completionPct: p.completion_pct || p.completionPct || 0,
+          isActive: p.is_active ?? p.isActive ?? true,
+          units: Array.isArray(p.units) ? p.units.map((u: any) => ({
+            id: String(u.id),
+            orgId: String(u.org_id || u.orgId || ''),
+            projectId: String(u.project_id || u.projectId || ''),
+            name: u.name || '',
+            code: u.code || '',
+            unitType: u.unit_type || u.unitType || '',
+            floor: u.floor || null,
+            areaSqm: u.area_sqm || u.areaSqm || null,
+            status: u.status || 'NOT_STARTED',
+            completionPct: u.completion_pct || u.completionPct || 0,
+            boqItems: Array.isArray(u.boq_items) ? u.boq_items.map((b: any) => ({
+              id: String(b.id),
+              orgId: String(b.org_id || b.orgId || ''),
+              unitId: String(b.unit_id || b.unitId || ''),
+              trade: b.trade || '',
+              description: b.description || '',
+              quantity: b.quantity || 0,
+              unitOfMeasure: b.unit_of_measure || b.unitOfMeasure || 'unit',
+              completionPct: b.completion_pct || b.completionPct || 0,
+            })) : (Array.isArray(u.boqItems) ? u.boqItems : [])
+          })) : [],
           assignments: Array.isArray(p.assignments) ? p.assignments : []
         }));
-        return { data: items, fromCache: false }
+        
+        return { data: mappedItems, fromCache: false }
       }
     } catch (err) {
       console.warn('Online fetch failed, falling back to cache:', err)
@@ -454,13 +466,28 @@ export async function getRemarksHybrid(orgId: string): Promise<{
       if (res.success && res.data) {
         let items = res.data.items || res.data;
         if (!Array.isArray(items)) items = [];
-        // FIX: Ensure photos array and unit object exist
-        items = items.map((r: any) => ({
-          ...r,
-          unit: r.unit || { id: r.unit_id || '', name: 'وحدة غير معروفة', code: 'N/A' },
+        
+        // SAFE MAPPING
+        const mappedItems = items.map((r: any) => ({
+          id: String(r.id),
+          orgId: String(r.org_id || r.orgId || ''),
+          unitId: String(r.unit_id || r.unitId || ''),
+          unit: r.unit || { id: String(r.unit_id || ''), name: 'وحدة غير معروفة', code: 'N/A' },
+          workOrderId: r.work_order_id ? String(r.work_order_id) : (r.workOrderId ? String(r.workOrderId) : null),
+          templateId: r.template_id ? String(r.template_id) : (r.templateId ? String(r.templateId) : null),
+          customIssue: r.custom_issue || r.customIssue || null,
+          severity: r.severity || 'MINOR',
+          status: r.status || 'OPEN',
           photos: Array.isArray(r.photos) ? r.photos : [],
+          gpsTag: r.gps_tag || r.gpsTag || null,
+          resolutionNotes: r.resolution_notes || r.resolutionNotes || null,
+          createdBy: r.created_by ? String(r.created_by) : (r.createdBy ? String(r.createdBy) : null),
+          resolvedAt: r.resolved_at || r.resolvedAt || null,
+          createdAt: r.created_at || r.createdAt || new Date().toISOString(),
+          updatedAt: r.updated_at || r.updatedAt || new Date().toISOString(),
         }));
-        return { data: items, fromCache: false }
+        
+        return { data: mappedItems, fromCache: false }
       }
     } catch (err) {
       console.warn('Online fetch failed, falling back to cache:', err)
@@ -478,12 +505,23 @@ export async function getUsersHybrid(orgId: string): Promise<{
       const res = await apiRequest<any>(`/auth/users`)
       if (res.success && res.data) {
         let items = Array.isArray(res.data) ? res.data : res.data.users || res.data.items || [];
-        // FIX: Ensure assignments array exists
-        items = items.map((u: any) => ({
-          ...u,
-          assignments: Array.isArray(u.assignments) ? u.assignments : []
+        
+        // SAFE MAPPING
+        const mappedItems = items.map((u: any) => ({
+          id: String(u.id),
+          orgId: String(u.org_id || u.orgId || ''),
+          email: u.email || '',
+          name: u.name || '',
+          isActive: u.is_active ?? u.isActive ?? true,
+          assignments: Array.isArray(u.assignments) ? u.assignments.map((a: any) => ({
+            id: String(a.id),
+            projectId: String(a.project_id || a.projectId || ''),
+            project: a.project || { id: String(a.project_id || ''), name: '', code: '' },
+            role: a.role || { id: String(a.role_id || ''), name: '' }
+          })) : []
         }));
-        return { data: items, fromCache: false }
+        
+        return { data: mappedItems, fromCache: false }
       }
     } catch (err) {
       console.warn('Online fetch failed, falling back to cache:', err)
@@ -500,7 +538,21 @@ export async function getAuditLogsHybrid(orgId: string): Promise<{
     try {
       const res = await apiRequest<any>(`/auth/audit?page_size=100`)
       if (res.success && res.data) {
-        return { data: res.data.items || res.data, fromCache: false }
+        let items = res.data.items || res.data;
+        if (!Array.isArray(items)) items = [];
+        
+        // SAFE MAPPING
+        const mappedItems = items.map((l: any) => ({
+          id: String(l.id),
+          user: l.user || null,
+          action: l.action || '',
+          resourceType: l.resource_type || l.resourceType || '',
+          resourceId: l.resource_id ? String(l.resource_id) : (l.resourceId ? String(l.resourceId) : null),
+          details: l.details_json || l.details || {},
+          createdAt: l.created_at || l.createdAt || new Date().toISOString(),
+        }));
+        
+        return { data: mappedItems, fromCache: false }
       }
     } catch (err) {
       console.warn('Online fetch failed, falling back to cache:', err)
@@ -519,14 +571,29 @@ export async function getDictionariesHybrid(orgId: string): Promise<{
       if (res.success && res.data) {
         let items = res.data.dictionaries || res.data.items || res.data;
         if (!Array.isArray(items)) items = [];
-        // FIX: Ensure items array exists
-        items = items.map((d: any) => ({
-          ...d,
-          items: Array.isArray(d.items) ? d.items : []
+        
+        // SAFE MAPPING
+        const mappedItems = items.map((d: any) => ({
+          id: String(d.id),
+          orgId: String(d.org_id || d.orgId || ''),
+          name: d.name || '',
+          category: d.category || '',
+          description: d.description || null,
+          isActive: d.is_active ?? d.isActive ?? true,
+          createdBy: d.created_by ? String(d.created_by) : (d.createdBy ? String(d.createdBy) : null),
+          items: Array.isArray(d.items) ? d.items.map((i: any) => ({
+            id: String(i.id),
+            dictionaryId: String(i.dictionary_id || i.dictionaryId || ''),
+            trade: i.trade || '',
+            description: i.description || '',
+            quantity: i.quantity || 0,
+            unitOfMeasure: i.unit_of_measure || i.unitOfMeasure || 'unit',
+            sortOrder: i.sort_order || i.sortOrder || 0,
+          })) : []
         }));
-        return { data: items, fromCache: false }
+        
+        return { data: mappedItems, fromCache: false }
       } else {
-        // FIX: Handle 422 or other errors gracefully
         return { data: [], fromCache: false }
       }
     } catch (err) {
