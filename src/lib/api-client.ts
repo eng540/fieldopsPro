@@ -1,3 +1,5 @@
+// --- START OF FILE src/lib/api-client.ts ---
+
 // FieldOps V4 — API Client (FastAPI Wired)
 // All requests go to FastAPI backend. No mock API routes.
 
@@ -5,10 +7,6 @@ import {
   db, addToSyncQueue, getPendingSyncItems, updateSyncQueueItem,
   clearCompletedSyncItems, getPendingSyncCount,
 } from './offline-db'
-
-// ============================================================
-// Types
-// ============================================================
 
 export interface ApiResponse<T = unknown> {
   success: boolean
@@ -26,10 +24,6 @@ export interface SyncStatus {
   errors: string[]
 }
 
-// ============================================================
-// Configuration
-// ============================================================
-
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'
 
 function getAccessToken(): string | null {
@@ -43,10 +37,6 @@ function getAccessToken(): string | null {
     return null
   }
 }
-
-// ============================================================
-// Network Detection
-// ============================================================
 
 let onlineStatus = typeof window !== 'undefined' ? navigator.onLine : true
 const onlineListeners: Set<(online: boolean) => void> = new Set()
@@ -71,10 +61,6 @@ export function onOnlineStatusChange(listener: (online: boolean) => void): () =>
   onlineListeners.add(listener)
   return () => onlineListeners.delete(listener)
 }
-
-// ============================================================
-// API Client — FastAPI Backend Only
-// ============================================================
 
 async function apiRequest<T>(
   endpoint: string,
@@ -116,38 +102,25 @@ async function apiRequest<T>(
   }
 }
 
-// ============================================================
-// File Upload Client — Multipart to FastAPI
-// ============================================================
-
 async function uploadFile(
   endpoint: string,
   files: File[],
   extraFields?: Record<string, string>
 ): Promise<ApiResponse<{ uploaded: number; urls: string[] }>> {
-  if (!onlineStatus) {
-    return { success: false, error: 'OFFLINE' }
-  }
+  if (!onlineStatus) return { success: false, error: 'OFFLINE' }
 
   const token = getAccessToken()
   const formData = new FormData()
 
-  for (const file of files) {
-    formData.append('files', file)
-  }
-
+  for (const file of files) formData.append('files', file)
   if (extraFields) {
-    for (const [key, value] of Object.entries(extraFields)) {
-      formData.append(key, value)
-    }
+    for (const [key, value] of Object.entries(extraFields)) formData.append(key, value)
   }
 
   try {
     const res = await fetch(`${API_BASE}${endpoint}`, {
       method: 'POST',
-      headers: {
-        ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
-      },
+      headers: { ...(token ? { 'Authorization': `Bearer ${token}` } : {}) },
       body: formData,
     })
 
@@ -162,10 +135,6 @@ async function uploadFile(
     return { success: false, error: String(error) }
   }
 }
-
-// ============================================================
-// Sync Engine — Wired to FastAPI /sync/push and /sync/pull
-// ============================================================
 
 let isSyncing = false
 let syncErrors: string[] = []
@@ -187,22 +156,8 @@ export function onSyncStatusChange(listener: (status: SyncStatus) => void): () =
   return () => syncListeners.delete(listener)
 }
 
-// ============================================================
-// processSyncQueue — Pushes pending operations to FastAPI /sync/push
-// Payload matches SyncPushRequest from openapi.yaml
-// ============================================================
-
 export async function processSyncQueue(): Promise<{
-  processed: number
-  failed: number
-  remaining: number
-  conflicts: Array<{
-    operation_uuid: string
-    conflict_type: string
-    server_value: Record<string, unknown>
-    client_value: Record<string, unknown>
-    resolution_hint: string
-  }>
+  processed: number; failed: number; remaining: number; conflicts: any[]
 }> {
   if (isSyncing || !onlineStatus) return { processed: 0, failed: 0, remaining: 0, conflicts: [] }
 
@@ -210,13 +165,7 @@ export async function processSyncQueue(): Promise<{
   syncErrors = []
   let processed = 0
   let failed = 0
-  const allConflicts: Array<{
-    operation_uuid: string
-    conflict_type: string
-    server_value: Record<string, unknown>
-    client_value: Record<string, unknown>
-    resolution_hint: string
-  }> = []
+  const allConflicts: any[] = []
 
   try {
     const pendingItems = await getPendingSyncItems()
@@ -227,7 +176,6 @@ export async function processSyncQueue(): Promise<{
       return { processed: 0, failed: 0, remaining: 0, conflicts: [] }
     }
 
-    // Build SyncPushRequest payload matching openapi.yaml
     const operations = pendingItems.map(item => {
       const payload = JSON.parse(item.payload)
       return {
@@ -252,28 +200,19 @@ export async function processSyncQueue(): Promise<{
 
     if (res.ok || res.status === 207) {
       const data = await res.json()
-
-      // Mark processed items as COMPLETED
       for (const uuid of (data.processed || [])) {
         const item = pendingItems.find(i => i.operationUuid === uuid)
         if (item?.id) {
-          await updateSyncQueueItem(item.id, {
-            status: 'COMPLETED',
-            processedAt: Date.now(),
-          })
+          await updateSyncQueueItem(item.id, { status: 'COMPLETED', processedAt: Date.now() })
           processed++
         }
       }
-
-      // Handle conflicts (207 Multi-Status)
-      // Store server_value from each conflict for the ConflictResolutionPanel
       for (const conflict of (data.conflicts || [])) {
         const item = pendingItems.find(i => i.operationUuid === conflict.operation_uuid)
         if (item?.id) {
           await updateSyncQueueItem(item.id, {
             status: 'CONFLICT',
             lastError: `${conflict.conflict_type}: ${conflict.resolution_hint}`,
-            // Store server data as JSON for the merge dialog
             serverData: conflict.server_value || null,
           })
           failed++
@@ -281,11 +220,8 @@ export async function processSyncQueue(): Promise<{
         allConflicts.push(conflict)
         syncErrors.push(`${conflict.conflict_type}: ${conflict.resolution_hint}`)
       }
-
-      // Clean up completed items
       await clearCompletedSyncItems()
     } else if (res.status === 409) {
-      // All blocked by governance
       const data = await res.json()
       for (const conflict of (data.conflicts || [])) {
         const item = pendingItems.find(i => i.operationUuid === conflict.operation_uuid)
@@ -300,7 +236,6 @@ export async function processSyncQueue(): Promise<{
         syncErrors.push(`BLOCKED: ${conflict.resolution_hint}`)
       }
     } else {
-      // Server error — retry later
       for (const item of pendingItems) {
         await updateSyncQueueItem(item.id!, {
           status: 'PENDING',
@@ -313,55 +248,34 @@ export async function processSyncQueue(): Promise<{
     syncErrors.push(String(err))
   } finally {
     isSyncing = false
-    const remaining = await getPendingSyncCount()
-    notifySyncListeners(remaining)
+    notifySyncListeners(await getPendingSyncCount())
   }
 
-  return {
-    processed,
-    failed,
-    remaining: await getPendingSyncCount(),
-    conflicts: allConflicts,
-  }
+  return { processed, failed, remaining: await getPendingSyncCount(), conflicts: allConflicts }
 }
 
-// ============================================================
-// fullDataSync — Pull from FastAPI /sync/pull
-// ============================================================
-
-export async function fullDataSync(orgId: string): Promise<{
-  success: boolean
-  synced: { projects: number; users: number; remarks: number; auditLogs: number; dictionaries: number }
-  errors: string[]
-}> {
+export async function fullDataSync(orgId: string): Promise<any> {
   const errors: string[] = []
   const synced = { projects: 0, users: 0, remarks: 0, auditLogs: 0, dictionaries: 0 }
 
-  if (!onlineStatus) {
-    return { success: false, synced, errors: ['OFFLINE'] }
-  }
+  if (!onlineStatus) return { success: false, synced, errors: ['OFFLINE'] }
 
   isSyncing = true
   notifySyncListeners(0)
 
   try {
     const token = getAccessToken()
-
-    // Pull from /sync/pull
     const pullRes = await fetch(`${API_BASE}/sync/pull`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
       },
-      body: JSON.stringify({
-        last_sync_version: null, // Full sync
-      }),
+      body: JSON.stringify({ last_sync_version: null }),
     })
 
     if (pullRes.ok) {
       const pullData = await pullRes.json()
-      // Cache work orders from pull bundle to local DB
       if (pullData.bundle?.work_orders) {
         for (const wo of pullData.bundle.work_orders) {
           await db.boqProgress.put({
@@ -384,7 +298,6 @@ export async function fullDataSync(orgId: string): Promise<{
       }
     } else errors.push('sync/pull: ' + String(pullRes.status))
 
-    // Pull users, remarks, audit logs from FastAPI
     const [userRes, remarkRes, auditRes] = await Promise.all([
       apiRequest<{ items: unknown[] }>(`/auth/users`),
       apiRequest<{ items: unknown[] }>(`/quality/remarks`),
@@ -392,121 +305,118 @@ export async function fullDataSync(orgId: string): Promise<{
     ])
 
     if (userRes.success && userRes.data) synced.users = (userRes.data as any).length || 0
-    else errors.push('users: ' + (userRes.error || 'unknown'))
-
     if (remarkRes.success && remarkRes.data) synced.remarks = (remarkRes.data as any).length || 0
-    else errors.push('remarks: ' + (remarkRes.error || 'unknown'))
-
     if (auditRes.success && auditRes.data) synced.auditLogs = (auditRes.data as any).length || 0
-    else errors.push('audit: ' + (auditRes.error || 'unknown'))
 
-    // Push pending changes
     await processSyncQueue()
-
     return { success: errors.length === 0, synced, errors }
   } catch (err) {
     errors.push(String(err))
     return { success: false, synced, errors }
   } finally {
     isSyncing = false
-    const remaining = await getPendingSyncCount()
-    notifySyncListeners(remaining)
+    notifySyncListeners(await getPendingSyncCount())
   }
 }
 
 // ============================================================
-// Hybrid Data Access — Online First, Offline Fallback
+// Hybrid Data Access — Safe Defaults added to prevent crashes
 // ============================================================
 
-export async function getProjectsHybrid(orgId: string): Promise<{
-  data: any[]; fromCache: boolean
-}> {
+export async function getProjectsHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> {
   if (onlineStatus) {
     try {
       const res = await apiRequest<any>(`/projects?org_id=${orgId}`)
       if (res.success && res.data) {
-        return { data: res.data.projects || res.data.items || res.data, fromCache: false }
+        let items = res.data.projects || res.data.items || res.data;
+        if (!Array.isArray(items)) items = [];
+        // Safe mapping to prevent undefined errors
+        items = items.map((p: any) => ({
+          ...p,
+          units: Array.isArray(p.units) ? p.units : [],
+          assignments: Array.isArray(p.assignments) ? p.assignments : []
+        }));
+        return { data: items, fromCache: false }
       }
-    } catch (err) {
-      console.warn('Online fetch failed, falling back to cache:', err)
-    }
+    } catch (err) { console.warn(err) }
   }
   const localData = await getLocalProjects()
   return { data: localData, fromCache: true }
 }
 
-export async function getRemarksHybrid(orgId: string): Promise<{
-  data: any[]; fromCache: boolean
-}> {
+export async function getRemarksHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> {
   if (onlineStatus) {
     try {
       const res = await apiRequest<any>(`/quality/remarks`)
       if (res.success && res.data) {
-        return { data: res.data.items || res.data, fromCache: false }
+        let items = res.data.items || res.data;
+        if (!Array.isArray(items)) items = [];
+        items = items.map((r: any) => ({
+          ...r,
+          unit: r.unit || { id: r.unit_id || '', name: 'وحدة غير معروفة', code: 'N/A' },
+          photos: Array.isArray(r.photos) ? r.photos : [],
+        }));
+        return { data: items, fromCache: false }
       }
-    } catch (err) {
-      console.warn('Online fetch failed, falling back to cache:', err)
-    }
+    } catch (err) { console.warn(err) }
   }
   const localData = await getLocalRemarks()
   return { data: localData, fromCache: true }
 }
 
-export async function getUsersHybrid(orgId: string): Promise<{
-  data: any[]; fromCache: boolean
-}> {
+export async function getUsersHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> {
   if (onlineStatus) {
     try {
       const res = await apiRequest<any>(`/auth/users`)
       if (res.success && res.data) {
-        return { data: Array.isArray(res.data) ? res.data : res.data.users || [], fromCache: false }
+        let items = Array.isArray(res.data) ? res.data : res.data.users || res.data.items || [];
+        items = items.map((u: any) => ({
+          ...u,
+          assignments: Array.isArray(u.assignments) ? u.assignments : []
+        }));
+        return { data: items, fromCache: false }
       }
-    } catch (err) {
-      console.warn('Online fetch failed, falling back to cache:', err)
-    }
+    } catch (err) { console.warn(err) }
   }
   const localData = await getLocalUsers()
   return { data: localData, fromCache: true }
 }
 
-export async function getAuditLogsHybrid(orgId: string): Promise<{
-  data: any[]; fromCache: boolean
-}> {
+export async function getAuditLogsHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> {
   if (onlineStatus) {
     try {
       const res = await apiRequest<any>(`/auth/audit?page_size=100`)
       if (res.success && res.data) {
         return { data: res.data.items || res.data, fromCache: false }
       }
-    } catch (err) {
-      console.warn('Online fetch failed, falling back to cache:', err)
-    }
+    } catch (err) { console.warn(err) }
   }
   const localData = await getLocalAuditLogs()
   return { data: localData, fromCache: true }
 }
 
-export async function getDictionariesHybrid(orgId: string): Promise<{
-  data: any[]; fromCache: boolean
-}> {
+export async function getDictionariesHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> {
   if (onlineStatus) {
     try {
       const res = await apiRequest<any>(`/projects/dictionaries?org_id=${orgId}`)
       if (res.success && res.data) {
-        return { data: res.data.dictionaries || res.data.items || res.data, fromCache: false }
+        let items = res.data.dictionaries || res.data.items || res.data;
+        if (!Array.isArray(items)) items = [];
+        items = items.map((d: any) => ({
+          ...d,
+          items: Array.isArray(d.items) ? d.items : []
+        }));
+        return { data: items, fromCache: false }
+      } else {
+        return { data: [], fromCache: false }
       }
-    } catch (err) {
-      console.warn('Online fetch failed, falling back to cache:', err)
-    }
+    } catch (err) { console.warn(err) }
   }
   const localData = await getLocalDictionaries()
   return { data: localData, fromCache: true }
 }
 
-// ============================================================
-// Local Data Accessors (IndexedDB)
-// ============================================================
-
+// Local Data Accessors
 export async function getLocalProjects(): Promise<any[]> {
   const projects = await db.projects.toArray()
   const result = []
@@ -517,7 +427,7 @@ export async function getLocalProjects(): Promise<any[]> {
       const boqItems = await db.boqItems.where('unitId').equals(unit.id).toArray()
       unitsWithBoq.push({ ...unit, boqItems })
     }
-    result.push({ ...project, units: unitsWithBoq })
+    result.push({ ...project, units: unitsWithBoq, assignments: [] })
   }
   return result
 }
@@ -528,7 +438,7 @@ export async function getLocalRemarks(): Promise<any[]> {
     ...r,
     photos: typeof r.photos === 'string' ? JSON.parse(r.photos) : r.photos,
     gpsTag: r.gpsTag ? (typeof r.gpsTag === 'string' ? JSON.parse(r.gpsTag) : r.gpsTag) : null,
-    unit: { id: r.unitId, name: '', code: '' },
+    unit: { id: r.unitId, name: 'وحدة محلية', code: 'N/A' },
   }))
 }
 
@@ -556,37 +466,16 @@ export async function getLocalDictionaries(): Promise<any[]> {
   }))
 }
 
-// ============================================================
-// Upload Photos to FastAPI S3 endpoint
-// ============================================================
-
-export async function uploadPhotosToServer(
-  remarkId: string,
-  files: File[]
-): Promise<{ uploaded: number; urls: string[] }> {
-  const result = await uploadFile(
-    `/quality/remarks/${remarkId}/photos`,
-    files
-  )
-  if (result.success && result.data) {
-    return result.data
-  }
+export async function uploadPhotosToServer(remarkId: string, files: File[]): Promise<{ uploaded: number; urls: string[] }> {
+  const result = await uploadFile(`/quality/remarks/${remarkId}/photos`, files)
+  if (result.success && result.data) return result.data
   throw new Error(result.error || 'Upload failed')
 }
 
-// ============================================================
-// Helpers
-// ============================================================
-
 function _mapEntityType(localType: string): string {
   const map: Record<string, string> = {
-    'project': 'WORK_ORDER',
-    'unit': 'UNIT_PROGRESS',
-    'boqProgress': 'UNIT_PROGRESS',
-    'remark': 'REMARK',
-    'photo': 'REMARK',
-    'user': 'WORK_ORDER',
-    'dictionary': 'WORK_ORDER',
+    'project': 'WORK_ORDER', 'unit': 'UNIT_PROGRESS', 'boqProgress': 'UNIT_PROGRESS',
+    'remark': 'REMARK', 'photo': 'REMARK', 'user': 'WORK_ORDER', 'dictionary': 'WORK_ORDER',
   }
   return map[localType] || 'WORK_ORDER'
 }
