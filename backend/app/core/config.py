@@ -54,20 +54,18 @@ class Settings(BaseSettings):
         return v
 
     # ─────────────────────────────────────────
-    # Database
+    # Database (PostgreSQL ONLY — no SQLite in production)
     # ─────────────────────────────────────────
     DATABASE_URL: str = Field(
-        default="sqlite+aiosqlite:///fieldops_dev.db",
-        description="Database connection string. Production: postgresql+asyncpg://",
+        default="postgresql+asyncpg://fieldops:changeme@localhost:5432/fieldops",
+        description="PostgreSQL connection string. Required: postgresql+asyncpg://",
     )
 
     @field_validator("DATABASE_URL")
     @classmethod
     def validate_database_url(cls, v: str) -> str:
-        """Validate DATABASE_URL format.
-
-        Sprint-2: Allow SQLite for testing, enforce PostgreSQL for production.
-        """
+        """Enforce PostgreSQL in production. SQLite only for testing."""
+        env = cls.model_fields.get("ENVIRONMENT")
         if v and not v.startswith(("postgresql+asyncpg://", "sqlite+aiosqlite://")):
             raise ValueError(
                 "DATABASE_URL must use asyncpg (production) or aiosqlite (testing) driver. "
@@ -132,6 +130,23 @@ class Settings(BaseSettings):
         "http://localhost:3000",
         "http://localhost:5173",
     ]
+
+    # ─────────────────────────────────────────
+    # S3 / Object Storage (Media uploads)
+    # ─────────────────────────────────────────
+    S3_ENDPOINT_URL: str | None = None  # None = AWS default; set for R2/MinIO
+    S3_ACCESS_KEY_ID: str = ""
+    S3_SECRET_ACCESS_KEY: str = ""
+    S3_BUCKET_NAME: str = "fieldops-media"
+    S3_REGION: str = "us-east-1"
+    S3_PUBLIC_URL_PREFIX: str = ""  # CDN prefix for public access
+
+    # ─────────────────────────────────────────
+    # Upload Limits
+    # ─────────────────────────────────────────
+    UPLOAD_DIR: str = "/tmp/fieldops_uploads"  # Fallback for local dev
+    MAX_FILE_BYTES: int = 10 * 1024 * 1024  # 10 MB
+    MAX_FILES_PER_REMARK: int = 20
 
 
 @lru_cache

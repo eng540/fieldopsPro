@@ -16,8 +16,9 @@ alembic = "^1.13"
 pydantic = "^2.7"
 pydantic-settings = "^2.2"
 python-jose = {extras = ["cryptography"], version = "^3.3"}
-passlib = {extras = ["bcrypt"], version = "^1.7"}
+bcrypt = ">=3.2.0"    # Direct bcrypt — passlib removed (incompatible with bcrypt 4.x)
 python-multipart = "^0.0.9"
+aioboto3 = "^13.0"
 redis = "^5.0"
 httpx = "^0.27"
 structlog = "^24.1"

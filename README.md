@@ -1,94 +1,142 @@
-# FieldOps V4.0 — Offline-First Field Operations Platform
+# FieldOps V4.0 — منصة العمليات الميدانية المتقدمة
 
-A production-ready field operations management platform for humanitarian and construction projects. Built for offline-first mobile usage with real-time synchronisation.
+> نظام إنتاج جاهز (Production-Ready) — FastAPI + PostgreSQL + Redis + Next.js 16 + Docker Compose
 
-## Architecture
+## 🏗️ العمارة
 
 ```
-fieldops-v4-source/
-├── backend/                    # FastAPI + SQLAlchemy + PostgreSQL
+┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│   Next.js    │────▶│   FastAPI    │────▶│  PostgreSQL  │
+│  (Frontend)  │     │  (Backend)   │     │  16 + RLS    │
+│  Port: 3000  │     │  Port: 8000  │     │  Port: 5432  │
+└──────────────┘     └──────┬───────┘     └──────────────┘
+                           │
+                     ┌─────┴──────┐
+                     │   Redis 7   │
+                     │  (Cache)    │
+                     │  Port: 6379 │
+                     └────────────┘
+```
+
+## 📁 هيكل المشروع
+
+```
+├── src/                          # Next.js Frontend
+│   ├── app/                      # App Router
+│   ├── components/fieldops/      # مكونات النظام
+│   └── lib/
+│       ├── api-client.ts         # عميل API (FastAPI)
+│       ├── auth-store.ts         # إدارة المصادقة (JWT)
+│       └── offline-db.ts         # IndexedDB (Dexie)
+├── backend/                      # FastAPI Backend
 │   ├── app/
-│   │   ├── core/               # Config, DB, Security, Redis
+│   │   ├── core/                 # الإعدادات الأساسية
+│   │   │   ├── config.py         # إعدادات التطبيق
+│   │   │   ├── database.py       # SQLAlchemy + PostgreSQL
+│   │   │   ├── security.py       # JWT + bcrypt
+│   │   │   ├── rls_middleware.py # Row-Level Security
+│   │   │   └── redis_client.py   # Redis cache
 │   │   └── modules/
-│   │       ├── iam/            # Identity & Access Management (9 endpoints)
-│   │       ├── projects/       # Projects, Units, BOQ (7 endpoints)
-│   │       ├── execution/      # Work Orders, BOQ Progress (7 endpoints)
-│   │       ├── sync/           # Offline Sync Engine (2 endpoints)
-│   │       ├── quality/        # QC Remarks + Photos (6 endpoints)
-│   │       ├── governance/     # Rule Engine + Decisions (6 endpoints)
-│   │       └── reporting/      # Analytics + IPC Export (5 endpoints)
-│   └── alembic/versions/       # 5 ordered migrations
-├── frontend/                   # React + TypeScript + Vite PWA
-│   ├── src/
-│   │   ├── components/         # 9 screens + UI components
-│   │   ├── stores/             # Zustand state (auth, projects, sync, governance)
-│   │   └── lib/                # client.ts, db.ts (Dexie), sync.ts, crypto.ts
-│   └── tests/e2e/              # Playwright smoke tests (27 tests, 8 suites)
-└── infrastructure/
-    └── docker/                 # docker-compose.yml + Dockerfiles
+│   │       ├── iam/              # المصادقة والصلاحيات
+│   │       ├── projects/         # المشاريع والوحدات
+│   │       ├── execution/        # التنفيذ الميداني
+│   │       ├── sync/             # محرك المزامنة
+│   │       ├── quality/          # مراقبة الجودة
+│   │       ├── governance/       # محرك الحوكمة
+│   │       └── reporting/        # التقارير
+│   ├── alembic/                  # Migrations
+│   └── scripts/seed.py           # بيانات تجريبية
+├── docs/openapi/openapi.yaml     # عقدة API
+├── infrastructure/docker/        # Dockerfiles
+├── docker-compose.yml            # Docker Compose
+├── .env.example                  # متغيرات البيئة
+└── Makefile                      # أوامر التطوير
 ```
 
-## API: 42 Endpoints
+## 🚀 التشغيل السريع
 
-| Module      | Endpoints | Key Capabilities |
-|-------------|-----------|-----------------|
-| `/auth`     | 9         | JWT, refresh, sessions, RBAC |
-| `/projects` | 7         | Projects, Units, BOQ items |
-| `/execution`| 7         | Work orders + BOQ progress (Monotonic ADR-003) |
-| `/sync`     | 2         | Pull/Push with Exactly-Once + Conflict Resolution |
-| `/quality`  | 6         | Remarks (UUID idempotent) + photo upload |
-| `/governance`| 6        | Rule engine + explainable decisions + overrides |
-| `/reporting`| 5         | Summary, project progress, WO breakdown, IPC export |
+### المتطلبات
+- Docker + Docker Compose
+- Node.js 20+
+- Python 3.12+
 
-## Constitutional Principles (ADRs)
-
-| ADR | Rule |
-|-----|------|
-| ADR-001 | Modular Monolith — no cross-module DB access |
-| ADR-002 | Offline-First Sync — Exactly-Once via `operation_uuid` |
-| ADR-003 | Monotonic Progress — `completion_pct` cannot decrease without rework |
-| ADR-004 | JWT Minimalism — identity only; roles resolved server-side from DB |
-
-## Quick Start
+### التشغيل بـ Docker Compose
 
 ```bash
-# 1. Copy environment variables
-cp .env.example .env  # Edit as needed
+# 1. إعداد متغيرات البيئة
+cp .env.example .env
+# عدّل .env وضع كلمات مرور آمنة
 
-# 2. Start services
-docker compose -f infrastructure/docker/docker-compose.yml up -d
+# 2. تشغيل جميع الخدمات
+docker compose up --build
 
-# 3. Run migrations (wait ~5s for DB to be ready)
-docker exec fieldops-api alembic upgrade head
-
-# 4. Access
-#    API Swagger: http://localhost:8000/docs
-#    Frontend:    http://localhost:3000
+# 3. تهيئة قاعدة البيانات
+docker compose exec api python -m scripts.seed
 ```
 
-## Development
+### التشغيل المحلي (للتطوير)
 
 ```bash
-# Backend
+# 1. شغّل PostgreSQL + Redis
+docker compose up postgres redis
+
+# 2. شغّل FastAPI
 cd backend
-pip install -r requirements.txt
+pip install -r requirements.txt  # أو: poetry install
 uvicorn app.main:app --reload --port 8000
 
-# Frontend
-cd frontend
-npm install
-npm run dev       # http://localhost:3000
-npm run build     # Production build
-npm run test      # Unit tests (Vitest)
-npx playwright test  # E2E tests
+# 3. شغّل Next.js
+npm run dev
+
+# 4. تهيئة البيانات التجريبية
+cd backend && python -m scripts.seed
 ```
 
-## Sprints Completed
+## 🔐 المصادقة
 
-| Sprint | Scope | Tests |
-|--------|-------|-------|
-| Sprint-0 | Baseline, infra, CI/CD | — |
-| Sprint-1 | IAM — Auth, Sessions, RBAC | 78 tests |
-| Sprint-2 | Execution CRUD + Sync Engine (CP-1 to CP-4) | 167 tests |
-| Sprint-3 | Projects, Quality, Governance, Reporting | 195 tests |
-| Sprint-4 | Integration fixes, Zero Tech Debt, Clean Architecture | 27 E2E tests |
+- **JWT Access Token**: 15 دقيقة، في الذاكرة فقط
+- **Refresh Token**: 7 أيام، HttpOnly Cookie (مع التدوير)
+- **الجلسات**: مسجلة في PostgreSQL + مُخزّنة مؤقتاً في Redis
+- **RLS**: PostgreSQL Row-Level Security حسب `org_id`
+
+### الحسابات التجريبية
+
+| البريد | كلمة المرور | الدور |
+|--------|-------------|-------|
+| admin@fieldops.sa | demo1234 | مدير النظام الأعلى |
+| orgadmin@fieldops.sa | demo1234 | مدير المنظمة |
+| pm@fieldops.sa | demo1234 | مدير مشروع |
+| field@fieldops.sa | demo1234 | مهندس ميداني |
+| viewer@fieldops.sa | demo1234 | مشاهد |
+
+## 🔄 محرك المزامنة (Offline-First)
+
+- **Pull**: `POST /api/v1/sync/pull` — تنزيل بيانات الخادم
+- **Push**: `POST /api/v1/sync/push` — رفع العمليات المعلقة
+- **Exactly-Once**: `operation_uuid` deduplication (72h window)
+- **Monotonic Progress**: نسبة الإنجاز لا يمكن أن تنخفض
+- **207 Multi-Status**: معالجة التعارضات الجزئية
+- **IndexedDB**: Dexie.js للتخزين المحلي
+
+## 📋 أوامر Makefile
+
+```bash
+make help          # عرض جميع الأوامر
+make dev           # تشغيل Docker Compose
+make seed          # تهيئة البيانات التجريبية
+make migrate       # تشغيل Alembic migrations
+make test          # تشغيل الاختبارات
+make build         # بناء الواجهة الأمامية
+```
+
+## 🛡️ الحوكمة (Governance)
+
+- كل قرار حوكمة يعيد `{decision, matched_rule, reason, policy_version}`
+- WORM Audit Trail — سجلات لا يمكن تعديلها أو حذفها
+- RLS في PostgreSQL + تصفية تطبيقية مزدوجة
+
+## 📦 S3 رفع الصور
+
+- رفع الصور عبر `aioboto3` إلى AWS S3
+- ممنوع تخزين Base64 في قاعدة البيانات
+- المسار: `POST /api/v1/quality/remarks/{id}/photos`

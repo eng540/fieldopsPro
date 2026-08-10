@@ -39,8 +39,13 @@ COPY alembic/ ./alembic/
 COPY alembic.ini ./
 
 # Non-root user for security
-RUN groupadd -r fieldops && useradd -r -g fieldops fieldops     && chown -R fieldops:fieldops /app
+RUN groupadd -r fieldops && useradd -r -g fieldops fieldops \
+    && chown -R fieldops:fieldops /app
 USER fieldops
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
 
 EXPOSE 8000
 

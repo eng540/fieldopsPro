@@ -263,20 +263,70 @@ async def upload_remark_photos(
 
 
 async def _save_file(content: bytes, filename: str, remark_id: str) -> str:
-    """Save file to local disk. Replace with S3/B2 presigned upload in production."""
-    import aiofiles
-    os.makedirs(_UPLOAD_DIR, exist_ok=True)
-    ext      = os.path.splitext(filename)[-1].lower() or ".jpg"
-    new_name = f"{remark_id}_{_uuid.uuid4().hex[:8]}{ext}"
-    path     = os.path.join(_UPLOAD_DIR, new_name)
+    """Save file to S3-compatible storage. Falls back to local disk for dev.
+
+    Production: Uses aioboto3 to upload to S3 (AWS S3, Cloudflare R2, MinIO).
+    Returns a public URL for the uploaded file.
+    """
+    import os, uuid as _uuid
+    from app.core.config import settings
+
+    ext = os.path.splitext(filename)[-1].lower() or ".jpg"
+    new_name = f"remarks/{remark_id}/{_uuid.uuid4().hex[:8]}{ext}"
+
+    # ── S3 Upload (production) ─────────────────────────────────────────
+    if settings.S3_ACCESS_KEY_ID and settings.S3_SECRET_ACCESS_KEY:
+        try:
+            import aioboto3
+            session = aioboto3.Session()
+
+            s3_kwargs = {
+                "aws_access_key_id": settings.S3_ACCESS_KEY_ID,
+                "aws_secret_access_key": settings.S3_SECRET_ACCESS_KEY,
+                "region_name": settings.S3_REGION,
+            }
+            if settings.S3_ENDPOINT_URL:
+                s3_kwargs["endpoint_url"] = settings.S3_ENDPOINT_URL
+
+            async with session.client("s3", **s3_kwargs) as s3_client:
+                # Determine content type
+                content_type_map = {
+                    ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                    ".png": "image/png", ".webp": "image/webp", ".heic": "image/heic",
+                }
+                content_type = content_type_map.get(ext, "image/jpeg")
+
+                await s3_client.put_object(
+                    Bucket=settings.S3_BUCKET_NAME,
+                    Key=new_name,
+                    Body=content,
+                    ContentType=content_type,
+                )
+
+            # Build public URL
+            if settings.S3_PUBLIC_URL_PREFIX:
+                return f"{settings.S3_PUBLIC_URL_PREFIX.rstrip('/')}/{new_name}"
+            elif settings.S3_ENDPOINT_URL:
+                return f"{settings.S3_ENDPOINT_URL.rstrip('/')}/{settings.S3_BUCKET_NAME}/{new_name}"
+            else:
+                return f"https://{settings.S3_BUCKET_NAME}.s3.{settings.S3_REGION}.amazonaws.com/{new_name}"
+
+        except Exception as e:
+            # S3 upload failed — fall back to local storage
+            import structlog
+            logger = structlog.get_logger()
+            logger.warning("s3_upload_failed", error=str(e), file=new_name)
+
+    # ── Local Fallback (development) ───────────────────────────────────
+    os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
+    path = os.path.join(settings.UPLOAD_DIR, new_name.replace("/", "_"))
 
     try:
         import aiofiles
         async with aiofiles.open(path, "wb") as f:
             await f.write(content)
     except ImportError:
-        # aiofiles not installed — sync fallback for dev
         with open(path, "wb") as f:
             f.write(content)
 
-    return f"/uploads/{new_name}"   # Served via static mount in main.py
+    return f"/uploads/{new_name.replace('/', '_')}"

@@ -1,110 +1,71 @@
-# FieldOps V4.0 — Platform Engineering Makefile
-.PHONY: dev test migrate lint format clean install backend-install frontend-install
+# FieldOps V4.0 — Makefile
+# Unified development commands
 
-# ─────────────────────────────────────────
-# DEVELOPMENT
-# ─────────────────────────────────────────
+.PHONY: help dev dev-api dev-web build up down seed migrate test
 
-dev:
-	@echo "🚀 Starting FieldOps V4.0 Development Environment..."
-	docker compose -f infrastructure/docker/docker-compose.yml up --build
+help: ## Show this help
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
+		awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
-dev-detached:
-	docker compose -f infrastructure/docker/docker-compose.yml up --build -d
+# ── Development ──────────────────────────────────────────
+dev: ## Start all services (Docker Compose)
+	docker compose up --build
 
-dev-down:
-	docker compose -f infrastructure/docker/docker-compose.yml down -v
+dev-api: ## Start FastAPI only (requires running PostgreSQL + Redis)
+	cd backend && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
-# ─────────────────────────────────────────
-# INSTALLATION
-# ─────────────────────────────────────────
+dev-web: ## Start Next.js frontend only
+	npm run dev
 
-install: backend-install frontend-install
+# ── Database ─────────────────────────────────────────────
+seed: ## Seed database with demo data
+	cd backend && python -m scripts.seed
 
-backend-install:
-	cd backend && poetry install --no-root
+migrate: ## Run Alembic migrations
+	cd backend && alembic upgrade head
 
-frontend-install:
-	cd frontend && npm install
+migrate-create: ## Create new migration (usage: make migrate-create msg="description")
+	cd backend && alembic revision --autogenerate -m "$(msg)"
 
-# ─────────────────────────────────────────
-# TESTING
-# ─────────────────────────────────────────
+# ── Docker ───────────────────────────────────────────────
+up: ## Start all containers
+	docker compose up -d --build
 
-test: test-backend test-frontend test-e2e
+down: ## Stop all containers
+	docker compose down
 
-test-backend:
-	cd backend && poetry run pytest -xvs --cov=app --cov-report=term-missing
+logs: ## Follow container logs
+	docker compose logs -f
 
-test-frontend:
-	cd frontend && npm run test -- --run
+# ── Build ────────────────────────────────────────────────
+build: ## Build frontend for production
+	npm run build
 
-test-e2e:
-	cd frontend && npx playwright test --project=chromium
+build-api: ## Build API Docker image
+	docker compose build api
 
-# ─────────────────────────────────────────
-# DATABASE
-# ─────────────────────────────────────────
+build-web: ## Build Web Docker image
+	docker compose build web
 
-migrate:
-	cd backend && poetry run alembic upgrade head
+# ── Testing ──────────────────────────────────────────────
+test: ## Run all tests
+	cd backend && python -m pytest tests/ -v
 
-migrate-make:
-	@read -p "Migration name: " name; 	cd backend && poetry run alembic revision --autogenerate -m "$$name"
+test-api: ## Run API tests only
+	cd backend && python -m pytest tests/ -v -k "not integration"
 
-# ─────────────────────────────────────────
-# CODE QUALITY
-# ─────────────────────────────────────────
+test-integration: ## Run integration tests
+	cd backend && python -m pytest tests/integration/ -v
 
-lint: lint-backend lint-frontend
-
-lint-backend:
-	cd backend && poetry run ruff check app tests
-	cd backend && poetry run mypy app --strict
-
-lint-frontend:
-	cd frontend && npm run lint
-	cd frontend && npx tsc --noEmit
-
-format:
-	cd backend && poetry run ruff format app tests
-	cd frontend && npm run format
-
-# ─────────────────────────────────────────
-# OPENAPI
-# ─────────────────────────────────────────
-
-validate-api:
-	@echo "🔍 Validating OpenAPI Contract..."
-	npx @redocly/cli lint docs/openapi/openapi.yaml
-
-gen-api-docs:
-	npx @redocly/cli build-docs docs/openapi/openapi.yaml -o docs/api/index.html
-
-# ─────────────────────────────────────────
-# CLEANUP
-# ─────────────────────────────────────────
-
-clean:
+# ── Cleanup ──────────────────────────────────────────────
+clean: ## Remove build artifacts
+	rm -rf .next node_modules/.cache backend/__pycache__
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-	find . -type d -name .pytest_cache -exec rm -rf {} + 2>/dev/null || true
-	find . -type d -name node_modules -exec rm -rf {} + 2>/dev/null || true
-	find . -type d -name dist -exec rm -rf {} + 2>/dev/null || true
-	find . -type d -name build -exec rm -rf {} + 2>/dev/null || true
-	docker system prune -f
 
-# ─────────────────────────────────────────
-# UTILITIES
-# ─────────────────────────────────────────
-
-logs-api:
-	docker compose -f infrastructure/docker/docker-compose.yml logs -f api
-
-logs-db:
-	docker compose -f infrastructure/docker/docker-compose.yml logs -f postgres
-
-shell-api:
-	docker compose -f infrastructure/docker/docker-compose.yml exec api bash
-
-shell-db:
-	docker compose -f infrastructure/docker/docker-compose.yml exec postgres psql -U fieldops -d fieldops
+reset-db: ## Reset database (WARNING: deletes all data)
+	docker compose down -v
+	docker compose up -d postgres redis
+	@echo "Waiting for PostgreSQL..."
+	@sleep 3
+	$(MAKE) migrate
+	$(MAKE) seed

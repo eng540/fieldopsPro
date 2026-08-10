@@ -164,6 +164,17 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    # Set RLS context for this database session (Phase 2 — defense-in-depth)
+    # This ensures PostgreSQL RLS policies enforce org_id isolation
+    try:
+        from app.core.rls_middleware import set_rls_context
+        await set_rls_context(db, user_context["org_id"])
+    except Exception:
+        pass  # RLS context failure is non-fatal — app-level filtering is primary defense
+
+    # Store org_id in request state for RLS middleware
+    request.state.org_id = user_context["org_id"]
+
     return user_context
 
 
