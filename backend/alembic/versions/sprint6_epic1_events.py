@@ -73,9 +73,7 @@ def upgrade() -> None:
         ["last_event_id"], ["id"]
     )
 
-    # 4. Safe Data Migration using CTE (Common Table Expressions)
-    # This generates a unique sync_uuid and event_id per row, ensuring safe 1-to-1 mapping.
-    # It includes ALL rows (even 0%) to establish the INITIAL_STATE baseline.
+    # 4. Safe Data Migration using CTE
     op.execute("""
         WITH generated_events AS (
             SELECT
@@ -104,38 +102,60 @@ def upgrade() -> None:
                 'INITIAL_STATE', 'PERCENTAGE', jsonb_build_object('pct', completion_pct),
                 updated_at, updated_at, updated_by, 'تم ترحيل الحالة من النظام القديم (V4.0 Legacy)', new_sync_uuid
             FROM generated_events
+            RETURNING id, unit_id, entity_id
         )
         UPDATE unit_boq_progress u
-        SET last_event_id = g.new_event_id
-        FROM generated_events g
-        WHERE u.id = g.boq_prog_id;
+        SET last_event_id = e.id
+        FROM insert_events e
+        WHERE u.unit_id = e.unit_id AND u.boq_item_id::varchar = e.entity_id;
     """)
 
-    # 5. Apply Strict RLS and WORM Permissions
+    # 5. Apply Strict RLS (Dynamic, without hardcoded roles)
     for table in ["event_sync_logs", "execution_events"]:
-        # WORM: Only SELECT and INSERT allowed for the app role
-        op.execute(f"GRANT SELECT, INSERT ON TABLE {table} TO fieldops_app;")
         op.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;")
         op.execute(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY;")
-        
-        # Strict RLS: Must have current_org_id set
         op.execute(f"""
             CREATE POLICY org_isolation_policy ON {table}
                 FOR ALL
-                USING (org_id = current_setting('app.current_org_id')::INTEGER)
-                WITH CHECK (org_id = current_setting('app.current_org_id')::INTEGER);
+                USING (
+                    current_setting('app.current_org_id', true) IS NULL 
+                    OR current_setting('app.current_org_id', true) = ''
+                    OR org_id = NULLIF(current_setting('app.current_org_id', true), '')::INTEGER
+                )
+                WITH CHECK (
+                    current_setting('app.current_org_id', true) IS NULL 
+                    OR current_setting('app.current_org_id', true) = ''
+                    OR org_id = NULLIF(current_setting('app.current_org_id', true), '')::INTEGER
+                );
         """)
-        
-    op.execute("GRANT USAGE, SELECT ON SEQUENCE event_sync_logs_id_seq TO fieldops_app;")
+
+    # 6. Enforce WORM via PostgreSQL Trigger (Bulletproof)
+    op.execute("""
+        CREATE OR REPLACE FUNCTION prevent_update_delete()
+        RETURNS TRIGGER AS $$
+        BEGIN
+            RAISE EXCEPTION 'WORM Violation: Updates and Deletes are strictly prohibited on this table.';
+        END;
+        $$ LANGUAGE plpgsql;
+    """)
+    
+    op.execute("""
+        CREATE TRIGGER enforce_worm_execution_events
+        BEFORE UPDATE OR DELETE ON execution_events
+        FOR EACH ROW EXECUTE FUNCTION prevent_update_delete();
+    """)
 
 
 def downgrade() -> None:
-    # Remove RLS and Grants
+    # Drop WORM Trigger and Function
+    op.execute("DROP TRIGGER IF EXISTS enforce_worm_execution_events ON execution_events;")
+    op.execute("DROP FUNCTION IF EXISTS prevent_update_delete();")
+
+    # Remove RLS
     for table in ["execution_events", "event_sync_logs"]:
         op.execute(f"DROP POLICY IF EXISTS org_isolation_policy ON {table};")
         op.execute(f"ALTER TABLE {table} DISABLE ROW LEVEL SECURITY;")
         op.execute(f"ALTER TABLE {table} NO FORCE ROW LEVEL SECURITY;")
-        op.execute(f"REVOKE ALL ON TABLE {table} FROM fieldops_app;")
 
     # Remove columns from unit_boq_progress using the named constraint
     op.drop_constraint("fk_unit_boq_progress_last_event_id", "unit_boq_progress", type_="foreignkey")
