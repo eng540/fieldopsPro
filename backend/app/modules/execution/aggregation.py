@@ -1,7 +1,7 @@
-"""Server-derived execution aggregation queries.
+"""Server-derived execution aggregation and closeout queries.
 
 The Event Ledger remains immutable; these endpoints aggregate the materialized
-UnitBoQProgress read model and never write progress snapshots.
+UnitBoQProgress read model plus QC/Governance evidence and never write progress.
 """
 from __future__ import annotations
 
@@ -17,6 +17,10 @@ from app.modules.quality.models import Remark, RemarkStatus, RemarkSeverity
 from app.modules.governance.models import GovernanceDecision
 
 router = APIRouter()
+
+
+def _decision_blocks(decision: GovernanceDecision | None) -> bool:
+    return decision is not None and not decision.is_overridden and decision.decision in {"HOLD", "STOP", "REWORK"}
 
 
 @router.get("/aggregation/project/{project_id}")
@@ -153,4 +157,93 @@ async def organization_execution_aggregation(
         "projects": projects,
         "project_count": len(projects),
         "portfolio_avg_completion_pct": round(sum(p["completion_pct"] for p in projects) / len(projects), 2) if projects else 0.0,
+    }
+
+
+@router.get("/closeout/unit/{unit_id}")
+async def unit_execution_closeout(
+    unit_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """Evaluate whether a unit has enough execution, QC and governance evidence for closeout.
+
+    This is intentionally read-only. It does not approve, close, or mutate any record.
+    """
+    org_id = current_user["org_id"]
+    unit = (await db.execute(
+        select(ProjectUnit).where(
+            ProjectUnit.id == unit_id,
+            ProjectUnit.org_id == org_id,
+            ProjectUnit.is_active.is_(True),
+        )
+    )).scalar_one_or_none()
+    if unit is None:
+        raise HTTPException(status_code=404, detail="Unit not found")
+
+    states = (await db.execute(
+        select(UnitBoQProgress).where(
+            UnitBoQProgress.org_id == org_id,
+            UnitBoQProgress.unit_id == unit_id,
+        ).order_by(UnitBoQProgress.boq_item_id)
+    )).scalars().all()
+
+    remarks = (await db.execute(
+        select(Remark).where(Remark.org_id == org_id, Remark.unit_id == unit_id)
+    )).scalars().all()
+
+    latest_decision = (await db.execute(
+        select(GovernanceDecision).where(
+            GovernanceDecision.org_id == org_id,
+            GovernanceDecision.unit_id == unit_id,
+        ).order_by(GovernanceDecision.created_at.desc()).limit(1)
+    )).scalar_one_or_none()
+
+    completion = sum(float(s.completion_pct) for s in states) / len(states) if states else 0.0
+    open_qc = [r for r in remarks if r.status in {RemarkStatus.OPEN.value, RemarkStatus.IN_REVIEW.value}]
+    blocking_qc = [r for r in open_qc if r.severity in {RemarkSeverity.CRITICAL.value, RemarkSeverity.MAJOR.value}]
+    rework = [s for s in states if s.status == "REWORK_REQUIRED"]
+    progress_complete = bool(states) and all(float(s.completion_pct) >= 100.0 for s in states)
+    governance_clear = latest_decision is not None and not _decision_blocks(latest_decision)
+
+    blockers: list[str] = []
+    if not states:
+        blockers.append("NO_EXECUTION_STATE")
+    if not progress_complete:
+        blockers.append("PROGRESS_NOT_COMPLETE")
+    if rework:
+        blockers.append("REWORK_REQUIRED")
+    if blocking_qc:
+        blockers.append("OPEN_BLOCKING_QC")
+    if latest_decision is None:
+        blockers.append("NO_GOVERNANCE_DECISION")
+    elif _decision_blocks(latest_decision):
+        blockers.append(f"GOVERNANCE_{latest_decision.decision}")
+
+    return {
+        "unit": {"id": unit.id, "project_id": unit.project_id, "code": unit.code, "name": unit.name, "status": unit.status},
+        "execution": {
+            "completion_pct": round(completion, 2),
+            "tracked_boq_items": len(states),
+            "rework_items": len(rework),
+            "progress_complete": progress_complete,
+        },
+        "quality": {
+            "total_remarks": len(remarks),
+            "open_or_in_review": len(open_qc),
+            "blocking_open": len(blocking_qc),
+            "critical_open": sum(1 for r in open_qc if r.severity == RemarkSeverity.CRITICAL.value),
+        },
+        "governance": {
+            "decision_id": latest_decision.id if latest_decision else None,
+            "decision": latest_decision.decision if latest_decision else None,
+            "payment_pct": latest_decision.payment_pct if latest_decision else None,
+            "clear": governance_clear,
+            "overridden": bool(latest_decision.is_overridden) if latest_decision else False,
+        },
+        "closeout": {
+            "ready": not blockers,
+            "blockers": blockers,
+            "policy": "execution_complete + no_blocking_qc + governance_clear",
+        },
     }
