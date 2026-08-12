@@ -14,7 +14,7 @@ from app.modules.iam.dependencies import get_current_user
 router = APIRouter()
 
 
-@router.get("/events", response_model=dict, status_code=200)
+@router.get("/events/history", response_model=dict, status_code=200)
 async def list_execution_events(
     unit_id: int | None = Query(default=None, gt=0),
     boq_item_id: int | None = Query(default=None, gt=0),
@@ -27,18 +27,17 @@ async def list_execution_events(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ) -> dict:
-    """Return a tenant-scoped, paginated read-only event timeline.
-
-    The ledger remains append-only; this endpoint never mutates execution state.
-    """
+    """Return a tenant-scoped, paginated read-only event timeline."""
     org_id = current_user["org_id"]
-
     filters = [ExecutionEvent.org_id == org_id]
+
     if unit_id is not None:
         filters.append(ExecutionEvent.unit_id == unit_id)
     if boq_item_id is not None:
-        filters.append(ExecutionEvent.entity_type == "BOQ_ITEM")
-        filters.append(ExecutionEvent.entity_id == str(boq_item_id))
+        filters.extend([
+            ExecutionEvent.entity_type == "BOQ_ITEM",
+            ExecutionEvent.entity_id == str(boq_item_id),
+        ])
     if event_type is not None:
         filters.append(ExecutionEvent.event_type == event_type)
     if event_class is not None:
@@ -48,20 +47,18 @@ async def list_execution_events(
     if occurred_to is not None:
         filters.append(ExecutionEvent.occurred_at <= occurred_to)
 
-    count_result = await db.execute(
+    total = (await db.execute(
         select(func.count()).select_from(ExecutionEvent).where(*filters)
-    )
-    total = count_result.scalar_one()
+    )).scalar_one()
 
     offset = (page - 1) * page_size
-    result = await db.execute(
+    events = (await db.execute(
         select(ExecutionEvent)
         .where(*filters)
         .order_by(ExecutionEvent.occurred_at.desc(), ExecutionEvent.recorded_at.desc())
         .offset(offset)
         .limit(page_size)
-    )
-    events = result.scalars().all()
+    )).scalars().all()
 
     items = [
         {
