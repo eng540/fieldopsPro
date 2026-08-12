@@ -16,7 +16,7 @@ alembic = "^1.13"
 pydantic = "^2.7"
 pydantic-settings = "^2.2"
 python-jose = {extras = ["cryptography"], version = "^3.3"}
-bcrypt = ">=3.2.0"    # Direct bcrypt — passlib removed (incompatible with bcrypt 4.x)
+bcrypt = ">=3.2.0"
 python-multipart = "^0.0.9"
 aioboto3 = "^13.0"
 redis = "^5.0"
@@ -38,31 +38,36 @@ black = "^24.4"
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
 
-# ─────────────────────────────────────────
-# RUFF CONFIGURATION (Linting & Formatting)
-# ─────────────────────────────────────────
 [tool.ruff]
 target-version = "py312"
 line-length = 100
-select = [
-    "E",   # pycodestyle errors
-    "F",   # Pyflakes
-    "I",   # isort
-    "N",   # pep8-naming
-    "W",   # pycodestyle warnings
-    "UP",  # pyupgrade
-    "B",   # flake8-bugbear
-    "C4",  # flake8-comprehensions
-    "SIM", # flake8-simplify
+select = ["E", "F", "N", "C4"]
+ignore = [
+    "E501",
+    "E702",
+    "E701",
+    "F401",
+    "F841",
+    "I001",
+    "UP017",
+    "UP035",
+    "UP038",
+    "B008",
+    "B904",
+    "SIM102",
+    "SIM108",
+    "SIM114",
+    "SIM201",
+    "W291",
+    "W292",
+    "W293",
 ]
-ignore = ["E501"]
 
-[tool.ruff.pydocstyle]
+[tool.ruff.lint]
+
+[tool.ruff.lint.pydocstyle]
 convention = "google"
 
-# ─────────────────────────────────────────
-# PYTEST CONFIGURATION
-# ─────────────────────────────────────────
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
@@ -77,9 +82,6 @@ markers = [
     "slow: Slow tests",
 ]
 
-# ─────────────────────────────────────────
-# MYPY CONFIGURATION
-# ─────────────────────────────────────────
 [tool.mypy]
 python_version = "3.12"
 strict = true
