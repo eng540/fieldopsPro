@@ -24,12 +24,11 @@ def upgrade() -> None:
         sa.Column("resolution_notes", sa.Text(), nullable=True),
         sa.Column("actor_id", sa.Integer(), sa.ForeignKey("users.id"), nullable=False),
         sa.Column("occurred_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.Column("metadata", sa.JSON(), nullable=False, server_default=sa.text("'{}'::json")),
+        sa.Column("metadata_json", sa.JSON(), nullable=False, server_default=sa.text("'{}'::json")),
     )
     op.create_index("ix_remark_status_events_org_id", "remark_status_events", ["org_id"])
     op.create_index("ix_remark_status_events_remark_id", "remark_status_events", ["remark_id"])
     op.create_index("ix_remark_status_events_occurred_at", "remark_status_events", ["occurred_at"])
-
     op.execute("""
         CREATE OR REPLACE FUNCTION prevent_remark_status_event_mutation()
         RETURNS trigger AS $$
@@ -43,7 +42,6 @@ def upgrade() -> None:
         BEFORE UPDATE OR DELETE ON remark_status_events
         FOR EACH ROW EXECUTE FUNCTION prevent_remark_status_event_mutation();
     """)
-
     op.execute("ALTER TABLE remark_status_events ENABLE ROW LEVEL SECURITY;")
     op.execute("ALTER TABLE remark_status_events FORCE ROW LEVEL SECURITY;")
     op.execute("""
