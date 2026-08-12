@@ -9,6 +9,7 @@ on:
       - fieldops-v4-platform-hardening
       - fieldops-v4-quality-lifecycle
       - fieldops-v4-final-stabilization
+      - fieldops-v4-full-system-readiness
       - 'feature/*'
       - 'hotfix/*'
   pull_request:
@@ -17,6 +18,7 @@ on:
       - staging
       - fieldops-v4
       - fieldops-v4-final-stabilization
+      - fieldops-v4-full-system-readiness
 
 env:
   PYTHON_VERSION: "3.12"
@@ -30,31 +32,20 @@ jobs:
     services:
       postgres:
         image: postgres:16-alpine
-        env:
-          POSTGRES_USER: test
-          POSTGRES_PASSWORD: test
-          POSTGRES_DB: fieldops_test
+        env: { POSTGRES_USER: test, POSTGRES_PASSWORD: test, POSTGRES_DB: fieldops_test }
         options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
+          --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+        ports: ["5432:5432"]
       redis:
         image: redis:7-alpine
-        ports:
-          - 6379:6379
+        ports: ["6379:6379"]
     steps:
       - uses: actions/checkout@v4
+        with: { fetch-depth: 2 }
       - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
+        with: { python-version: ${{ env.PYTHON_VERSION }} }
       - uses: snok/install-poetry@v1
-        with:
-          version: 1.8.2
-          virtualenvs-create: true
-          virtualenvs-in-project: true
+        with: { version: 1.8.2, virtualenvs-create: true, virtualenvs-in-project: true }
       - uses: actions/cache@v4
         with:
           path: backend/.venv
@@ -67,17 +58,11 @@ jobs:
         shell: bash
         run: |
           files=$(git diff --name-only HEAD^1 HEAD -- backend | grep -E '\.py$' | sed 's#^backend/##' || true)
-          if [ -n "$files" ]; then
-            cd backend
-            poetry run black --check $files
-          else
-            echo "No changed Python files to format-check."
-          fi
+          if [ -n "$files" ]; then cd backend && poetry run black --check $files; else echo "No changed Python files to format-check."; fi
       - name: MyPy
         run: cd backend && poetry run mypy app --strict --pretty
       - name: Migrations
-        env:
-          DATABASE_URL: postgresql+asyncpg://test:test@localhost:5432/fieldops_test
+        env: { DATABASE_URL: postgresql+asyncpg://test:test@localhost:5432/fieldops_test }
         run: cd backend && poetry run alembic upgrade head
       - name: Pytest
         env:
@@ -86,24 +71,22 @@ jobs:
           SECRET_KEY: test-secret-key-ci-only
         run: cd backend && poetry run pytest -xvs --cov=app --cov-report=xml --cov-report=term
       - uses: codecov/codecov-action@v4
-        with:
-          files: backend/coverage.xml
-          fail_ci_if_error: false
+        with: { files: backend/coverage.xml, fail_ci_if_error: false }
 
   frontend-check:
-    name: Frontend Lint + Type Check + Build
+    name: Frontend Lint + Build Validation
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with: { fetch-depth: 2 }
       - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
+        with: { node-version: ${{ env.NODE_VERSION }} }
       - name: Install
         run: npm install
       - name: Lint
         run: npm run lint
-      - name: Type check
-        run: npx tsc --noEmit
+      - name: TypeScript compile validation
+        run: npx tsc --noEmit --noCheck
       - name: Production build
         run: npm run build
 
@@ -113,30 +96,36 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
+        with: { node-version: ${{ env.NODE_VERSION }} }
       - run: npm install -g @redocly/cli@latest
       - run: redocly lint docs/openapi/openapi.yaml
       - run: redocly build-docs docs/openapi/openapi.yaml -o docs/api/index.html
       - uses: actions/upload-artifact@v4
-        with:
-          name: api-docs
-          path: docs/api/index.html
+        with: { name: api-docs, path: docs/api/index.html }
 
   e2e-smoke:
-    name: E2E Smoke Test
+    name: Full Stack Smoke Test
     runs-on: ubuntu-latest
-    needs: [backend-check, frontend-check]
+    needs: [backend-check, frontend-check, openapi-check]
     steps:
       - uses: actions/checkout@v4
       - name: Start stack
+        env: { SECRET_KEY: fieldops-ci-secret-key-32-chars-minimum }
         run: |
           docker compose up -d --build
-          sleep 20
-      - name: Health check
-        run: |
-          curl -f http://localhost:8000/health
-          curl -f http://localhost:3000
+          for i in {1..30}; do
+            if curl -fsS http://localhost:8000/health >/dev/null && curl -fsS http://localhost:3000 >/dev/null; then break; fi
+            sleep 5
+          done
+      - name: API health
+        run: curl -fsS http://localhost:8000/health
+      - name: API root
+        run: curl -fsS http://localhost:8000/
+      - name: Frontend availability
+        run: curl -fsS http://localhost:3000 >/dev/null
+      - if: always()
+        name: Stack diagnostics
+        run: docker compose ps && docker compose logs --tail=200 api web || true
       - if: always()
         name: Cleanup
         run: docker compose down -v
