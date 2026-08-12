@@ -2,7 +2,6 @@
 from __future__ import annotations
 from datetime import datetime
 from pydantic import BaseModel, Field, field_validator
-
 from app.modules.quality.models import RemarkSeverity, RemarkStatus
 
 
@@ -89,7 +88,7 @@ class RemarkStatusEventRead(BaseModel):
     resolution_notes: str | None
     actor_id: int
     occurred_at: datetime
-    metadata: dict
+    event_metadata: dict
     model_config = {"from_attributes": True}
 
 
