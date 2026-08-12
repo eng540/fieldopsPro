@@ -1,7 +1,7 @@
 """Execution Event Pipeline service.
 
-The event log is the source of truth. UnitBoQProgress is a materialized read model
-and is mutated only inside this pipeline transaction.
+The event ledger is the source of truth. UnitBoQProgress is a materialized
+read model and is mutated only inside this service's transaction boundary.
 """
 from datetime import datetime, timezone
 from typing import Any
@@ -56,10 +56,98 @@ def _validate_status_transition(current: str, requested: str) -> str:
     except ValueError as exc:
         raise BusinessRuleError(f"Invalid status transition value: {current} -> {requested}") from exc
     if requested_enum != current_enum and requested_enum not in MONOTONIC_STATUS_TRANSITIONS.get(current_enum, []):
-        raise BusinessRuleError(
-            f"Invalid status transition: {current_enum.value} -> {requested_enum.value}."
-        )
+        raise BusinessRuleError(f"Invalid status transition: {current_enum.value} -> {requested_enum.value}.")
     return requested_enum.value
+
+
+async def initialize_boq_state(
+    db: AsyncSession,
+    *,
+    org_id: int,
+    unit_id: int,
+    boq_item_id: int,
+    user_id: int,
+) -> UnitBoQProgress:
+    """Create a new BOQ read-model row together with its INITIAL_STATE event.
+
+    This is the only supported path for introducing a new BOQ state after the
+    migration baseline. It keeps the event ledger and read model consistent.
+    """
+    existing = await db.execute(
+        select(UnitBoQProgress)
+        .where(
+            UnitBoQProgress.org_id == org_id,
+            UnitBoQProgress.unit_id == unit_id,
+            UnitBoQProgress.boq_item_id == boq_item_id,
+        )
+        .with_for_update()
+    )
+    state = existing.scalar_one_or_none()
+    if state is not None:
+        return state
+
+    event_id = str(uuid4())
+    sync_uuid = str(uuid4())
+    now = datetime.now(timezone.utc)
+    initial_value = {
+        "pct": 0.0,
+        "qty": 0.0,
+        "status": UnitBoQProgressStatus.NOT_STARTED.value,
+    }
+
+    db.add(
+        EventSyncLog(
+            org_id=org_id,
+            operation_uuid=sync_uuid,
+            status="PROCESSED",
+            response_payload={
+                "event_id": event_id,
+                "sync_uuid": sync_uuid,
+                "new_version": 1,
+                "status": "PROCESSED",
+                "recorded_at": now.isoformat(),
+            },
+        )
+    )
+    state = UnitBoQProgress(
+        org_id=org_id,
+        unit_id=unit_id,
+        boq_item_id=boq_item_id,
+        completion_pct=0.0,
+        status=UnitBoQProgressStatus.NOT_STARTED.value,
+        measured_quantity=None,
+        actual_quantity=0.0,
+        state_version=1,
+        rework_flag=False,
+        updated_by=user_id,
+        last_event_id=event_id,
+    )
+    db.add(state)
+    db.add(
+        ExecutionEvent(
+            id=event_id,
+            org_id=org_id,
+            unit_id=unit_id,
+            entity_type="BOQ_ITEM",
+            entity_id=str(boq_item_id),
+            event_class="PROGRESS",
+            event_type="INITIAL_STATE",
+            metric_type="PERCENTAGE",
+            previous_value=None,
+            new_value=initial_value,
+            delta_value=None,
+            occurred_at=now,
+            recorded_at=now,
+            user_id=user_id,
+            notes="Initialized by execution pipeline",
+            sync_uuid=sync_uuid,
+        )
+    )
+    try:
+        await db.flush()
+    except IntegrityError as exc:
+        raise BusinessRuleError("BOQ state could not be initialized due to a concurrent change.") from exc
+    return state
 
 
 async def process_event_intent(
@@ -90,6 +178,8 @@ async def process_event_intent(
         raise BusinessRuleError(
             f"State tracking for entity type {intent.entity_type.value} is not implemented."
         )
+    if intent.unit_id is None:
+        raise BusinessRuleError("unit_id is required for BOQ_ITEM events.")
 
     try:
         boq_item_id = int(intent.entity_id)
@@ -154,22 +244,16 @@ async def process_event_intent(
             raise BusinessRuleError("DELTA_ADD supports PERCENTAGE or QUANTITY only.")
 
     elif intent.event_type in {EventType.SNAPSHOT_SET, EventType.DATA_CORRECTION}:
-        if intent.event_type == EventType.SNAPSHOT_SET:
-            if intent.metric_type == MetricType.PERCENTAGE:
-                new_pct = _number(intent.value, "pct")
-            elif intent.metric_type == MetricType.QUANTITY:
-                new_qty = _number(intent.value, "qty")
-            else:
-                raise BusinessRuleError("SNAPSHOT_SET supports PERCENTAGE or QUANTITY only.")
+        if intent.event_type == EventType.DATA_CORRECTION and (
+            not intent.reason or len(intent.reason.strip()) < 10
+        ):
+            raise BusinessRuleError("DATA_CORRECTION requires a reason of at least 10 characters.")
+        if intent.metric_type == MetricType.PERCENTAGE:
+            new_pct = _number(intent.value, "pct")
+        elif intent.metric_type == MetricType.QUANTITY:
+            new_qty = _number(intent.value, "qty")
         else:
-            if not intent.reason or len(intent.reason.strip()) < 10:
-                raise BusinessRuleError("DATA_CORRECTION requires a reason of at least 10 characters.")
-            if intent.metric_type == MetricType.PERCENTAGE:
-                new_pct = _number(intent.value, "pct")
-            elif intent.metric_type == MetricType.QUANTITY:
-                new_qty = _number(intent.value, "qty")
-            else:
-                raise BusinessRuleError("DATA_CORRECTION supports PERCENTAGE or QUANTITY only.")
+            raise BusinessRuleError("Snapshot/correction supports PERCENTAGE or QUANTITY only.")
 
     elif intent.event_type == EventType.REWORK:
         if not intent.reason or len(intent.reason.strip()) < 20:
@@ -189,7 +273,7 @@ async def process_event_intent(
         new_status = _validate_status_transition(current_state.status, requested)
 
     elif intent.event_type == EventType.INITIAL_STATE:
-        raise BusinessRuleError("INITIAL_STATE is reserved for controlled data migration.")
+        raise BusinessRuleError("INITIAL_STATE is reserved for controlled initialization/migration.")
 
     if intent.event_type not in {EventType.STATUS_CHANGE, EventType.REWORK}:
         if not 0.0 <= new_pct <= 100.0:
@@ -198,36 +282,36 @@ async def process_event_intent(
             new_status = UnitBoQProgressStatus.COMPLETED.value
         elif new_pct > 0.0:
             new_status = UnitBoQProgressStatus.IN_PROGRESS.value
-        elif new_pct == 0.0:
+        else:
             new_status = UnitBoQProgressStatus.NOT_STARTED.value
 
     event_id = str(uuid4())
     server_now = datetime.now(timezone.utc)
     new_value = {"pct": new_pct, "qty": new_qty, "status": new_status}
 
-    event = ExecutionEvent(
-        id=event_id,
-        org_id=org_id,
-        project_id=None,
-        unit_id=current_state.unit_id,
-        entity_type=intent.entity_type,
-        entity_id=intent.entity_id,
-        event_class=intent.event_class,
-        event_type=intent.event_type,
-        metric_type=intent.metric_type,
-        previous_value=previous_value,
-        new_value=new_value,
-        delta_value=intent.value,
-        unit_of_measure=intent.unit_of_measure,
-        occurred_at=intent.occurred_at,
-        recorded_at=server_now,
-        user_id=user_id,
-        reason=intent.reason,
-        notes=intent.notes,
-        sync_uuid=intent.sync_uuid,
-        transaction_group_id=transaction_group_id,
+    db.add(
+        ExecutionEvent(
+            id=event_id,
+            org_id=org_id,
+            unit_id=current_state.unit_id,
+            entity_type=intent.entity_type,
+            entity_id=intent.entity_id,
+            event_class=intent.event_class,
+            event_type=intent.event_type,
+            metric_type=intent.metric_type,
+            previous_value=previous_value,
+            new_value=new_value,
+            delta_value=intent.value,
+            unit_of_measure=intent.unit_of_measure,
+            occurred_at=intent.occurred_at,
+            recorded_at=server_now,
+            user_id=user_id,
+            reason=intent.reason,
+            notes=intent.notes,
+            sync_uuid=intent.sync_uuid,
+            transaction_group_id=transaction_group_id,
+        )
     )
-    db.add(event)
 
     current_state.completion_pct = new_pct
     current_state.actual_quantity = new_qty
@@ -235,6 +319,8 @@ async def process_event_intent(
     current_state.state_version += 1
     current_state.last_event_id = event_id
     current_state.updated_by = user_id
+    current_state.rework_flag = intent.event_type == EventType.REWORK
+    current_state.rework_reason = intent.reason if intent.event_type == EventType.REWORK else None
 
     response_payload = {
         "event_id": event_id,
@@ -256,7 +342,7 @@ async def process_event_intent(
         await db.flush()
     except IntegrityError as exc:
         raise BusinessRuleError(
-            "Event could not be committed because its sync_uuid already exists. Retry as idempotent request."
+            "Event could not be committed because its sync_uuid already exists. Retry the request."
         ) from exc
 
     return EventResponse(**response_payload)
