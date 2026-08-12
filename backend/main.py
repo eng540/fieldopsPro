@@ -3,14 +3,15 @@
 """FieldOps V4.0 — Main Application Entry Point"""
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, APIRouter
+from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
-from app.core.database import engine, Base
+from app.core.database import Base, engine
 
 from app.modules.iam import router as iam_router
 from app.modules.execution import router as execution_router
+from app.modules.execution import event_query as execution_event_query_router
 from app.modules.sync import router as sync_router
 from app.modules.projects import router as projects_router
 from app.modules.quality import router as quality_router
@@ -38,24 +39,26 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS, # تم تصحيحها من ALLOWED_ORIGINS لتطابق config.py
-    allow_origin_regex=r"https://.*\.up\.railway\.app", # السماح لنطاقات Railway
+    allow_origins=settings.CORS_ORIGINS,
+    allow_origin_regex=r"https://.*\\.up\\.railway\\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ── Router Registration ──────────────────────────────────────────────────────
-# تم تجميع المسارات تحت البادئة /api/v1 لكي تتطابق مع طلبات الواجهة الأمامية
 api_router = APIRouter(prefix="/api/v1")
-
-api_router.include_router(iam_router,        prefix="/auth",       tags=["Authentication & IAM"])
-api_router.include_router(projects_router,   prefix="/projects",   tags=["Projects & Units"])
-api_router.include_router(execution_router,  prefix="/execution",  tags=["Field Execution"])
-api_router.include_router(sync_router,       prefix="/sync",       tags=["Sync Engine"])
-api_router.include_router(quality_router,    prefix="/quality",    tags=["Quality Control"])
+api_router.include_router(iam_router, prefix="/auth", tags=["Authentication & IAM"])
+api_router.include_router(projects_router, prefix="/projects", tags=["Projects & Units"])
+api_router.include_router(execution_router, prefix="/execution", tags=["Field Execution"])
+api_router.include_router(
+    execution_event_query_router.router,
+    prefix="/execution",
+    tags=["Execution Event History"],
+)
+api_router.include_router(sync_router, prefix="/sync", tags=["Sync Engine"])
+api_router.include_router(quality_router, prefix="/quality", tags=["Quality Control"])
 api_router.include_router(governance_router, prefix="/governance", tags=["Governance Engine"])
-api_router.include_router(reporting_router,  prefix="/reporting",  tags=["Reporting & Analytics"])
+api_router.include_router(reporting_router, prefix="/reporting", tags=["Reporting & Analytics"])
 
 app.include_router(api_router)
 
