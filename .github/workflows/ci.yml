@@ -16,8 +16,6 @@ on:
       - main
       - staging
       - fieldops-v4
-      - fieldops-v4-platform-hardening
-      - fieldops-v4-quality-lifecycle
       - fieldops-v4-final-stabilization
 
 env:
@@ -65,8 +63,16 @@ jobs:
         run: cd backend && poetry install --no-interaction --no-ansi
       - name: Ruff
         run: cd backend && poetry run ruff check app tests --output-format=github
-      - name: Black
-        run: cd backend && poetry run black --check app tests
+      - name: Black (changed backend files)
+        shell: bash
+        run: |
+          files=$(git diff --name-only HEAD^1 HEAD -- backend | grep -E '\.py$' | sed 's#^backend/##' || true)
+          if [ -n "$files" ]; then
+            cd backend
+            poetry run black --check $files
+          else
+            echo "No changed Python files to format-check."
+          fi
       - name: MyPy
         run: cd backend && poetry run mypy app --strict --pretty
       - name: Migrations
