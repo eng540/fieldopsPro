@@ -8,9 +8,9 @@ Constitutional (ADR-002):
 - All endpoints require valid JWT (get_current_user)
 - org_id always injected from JWT — never trusted from client
 - Pull: cursor-based incremental sync, project-scoped, batch-limited
-- Push: Exactly-Once (operation_uuid dedup) + Monotonic Progress + WORM audit
+- Push: Exactly-Once + per-operation SAVEPOINT + Monotonic Progress + WORM audit
 - Multi-Status 207: some operations failed, others succeeded
-- 409: all operations blocked by governance rule
+- 409: all operations blocked by governance/policy conflict
 """
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,7 +18,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.modules.iam.dependencies import get_current_user
 from app.modules.sync.schemas import SyncPullRequest, SyncPullResponse, SyncPushRequest, SyncPushResponse
-from app.modules.sync.service import pull_sync, push_sync
+from app.modules.sync.service import pull_sync
+from app.modules.sync.atomic_service import push_sync_atomic
 
 router = APIRouter()
 
@@ -57,13 +58,14 @@ async def sync_pull(
     summary="Push offline operations to server",
     description=(
         "Uploads queued operations from device to server. "
-        "Implements Exactly-Once processing via operation_uuid (ADR-002 CR-02). "
-        "Returns 200 if all processed, 207 if partial, 409 if all blocked."
+        "Each operation executes inside an independent database SAVEPOINT, "
+        "so one failed operation cannot roll back successful operations "
+        "from the same batch. Exactly-Once processing uses operation_uuid."
     ),
     responses={
         200: {"description": "All operations processed successfully"},
         207: {"description": "Multi-Status — some operations failed"},
-        409: {"description": "Governance conflict — all operations blocked"},
+        409: {"description": "All operations blocked"},
         422: {"description": "Validation error (malformed request)"},
     },
 )
@@ -78,34 +80,30 @@ async def sync_push(
             detail="operations list cannot be empty",
         )
 
-    result = await push_sync(
+    result = await push_sync_atomic(
         db=db,
         user_context=current_user,
         operations=request.operations,
     )
 
-    # Determine HTTP status per OpenAPI spec:
+    # Determine HTTP status per OpenAPI contract:
     # 200: all processed
-    # 207: partial (some conflicts)
-    # 409: all blocked (zero processed)
-    total = len(request.operations)
+    # 207: partial
+    # 409: zero processed and at least one conflict
     n_processed = len(result.processed)
     n_conflicts = len(result.conflicts)
 
     if n_conflicts == 0:
-        # 200: all good
         return result
-    elif n_processed == 0:
-        # 409: all blocked
+    if n_processed == 0:
         from fastapi.responses import JSONResponse
         return JSONResponse(
             status_code=status.HTTP_409_CONFLICT,
             content=result.model_dump(),
         )
-    else:
-        # 207: partial
-        from fastapi.responses import JSONResponse
-        return JSONResponse(
-            status_code=207,
-            content=result.model_dump(),
-        )
+
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=207,
+        content=result.model_dump(),
+    )

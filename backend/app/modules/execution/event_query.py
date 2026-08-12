@@ -1,9 +1,9 @@
-"""Read-only query endpoints for the Epic 1 execution event ledger."""
+"""Read-only query API for the Epic 1 execution event ledger."""
 from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,6 +12,32 @@ from app.modules.execution.models import ExecutionEvent
 from app.modules.iam.dependencies import get_current_user
 
 router = APIRouter()
+
+
+def _event_payload(event: ExecutionEvent) -> dict:
+    return {
+        "event_id": event.id,
+        "org_id": event.org_id,
+        "project_id": event.project_id,
+        "unit_id": event.unit_id,
+        "entity_type": event.entity_type,
+        "entity_id": event.entity_id,
+        "event_class": event.event_class,
+        "event_type": event.event_type,
+        "metric_type": event.metric_type,
+        "previous_value": event.previous_value,
+        "new_value": event.new_value,
+        "delta_value": event.delta_value,
+        "unit_of_measure": event.unit_of_measure,
+        "occurred_at": event.occurred_at,
+        "effective_date": event.effective_date,
+        "recorded_at": event.recorded_at,
+        "user_id": event.user_id,
+        "reason": event.reason,
+        "notes": event.notes,
+        "sync_uuid": event.sync_uuid,
+        "transaction_group_id": event.transaction_group_id,
+    }
 
 
 @router.get("/events/history", response_model=dict, status_code=200)
@@ -27,10 +53,9 @@ async def list_execution_events(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ) -> dict:
-    """Return a tenant-scoped, paginated read-only event timeline."""
+    """Return a deterministic tenant-scoped event timeline."""
     org_id = current_user["org_id"]
     filters = [ExecutionEvent.org_id == org_id]
-
     if unit_id is not None:
         filters.append(ExecutionEvent.unit_id == unit_id)
     if boq_item_id is not None:
@@ -50,43 +75,19 @@ async def list_execution_events(
     total = (await db.execute(
         select(func.count()).select_from(ExecutionEvent).where(*filters)
     )).scalar_one()
-
     offset = (page - 1) * page_size
     events = (await db.execute(
         select(ExecutionEvent)
         .where(*filters)
-        .order_by(ExecutionEvent.occurred_at.desc(), ExecutionEvent.recorded_at.desc())
+        .order_by(
+            ExecutionEvent.occurred_at.desc(),
+            ExecutionEvent.recorded_at.desc(),
+            ExecutionEvent.id.desc(),
+        )
         .offset(offset)
         .limit(page_size)
     )).scalars().all()
-
-    items = [
-        {
-            "event_id": event.id,
-            "org_id": event.org_id,
-            "project_id": event.project_id,
-            "unit_id": event.unit_id,
-            "entity_type": event.entity_type,
-            "entity_id": event.entity_id,
-            "event_class": event.event_class,
-            "event_type": event.event_type,
-            "metric_type": event.metric_type,
-            "previous_value": event.previous_value,
-            "new_value": event.new_value,
-            "delta_value": event.delta_value,
-            "unit_of_measure": event.unit_of_measure,
-            "occurred_at": event.occurred_at,
-            "effective_date": event.effective_date,
-            "recorded_at": event.recorded_at,
-            "user_id": event.user_id,
-            "reason": event.reason,
-            "notes": event.notes,
-            "sync_uuid": event.sync_uuid,
-            "transaction_group_id": event.transaction_group_id,
-        }
-        for event in events
-    ]
-
+    items = [_event_payload(event) for event in events]
     return {
         "items": items,
         "total": total,
@@ -94,3 +95,18 @@ async def list_execution_events(
         "page_size": page_size,
         "has_more": offset + len(items) < total,
     }
+
+
+@router.get("/events/{event_id}", response_model=dict, status_code=200)
+async def get_execution_event(
+    event_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    event = (await db.execute(select(ExecutionEvent).where(
+        ExecutionEvent.id == event_id,
+        ExecutionEvent.org_id == current_user["org_id"],
+    ))).scalar_one_or_none()
+    if event is None:
+        raise HTTPException(status_code=404, detail="Execution event not found")
+    return _event_payload(event)
