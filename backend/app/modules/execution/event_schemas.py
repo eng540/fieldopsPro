@@ -8,6 +8,13 @@ from app.modules.execution.models import EntityType, EventClass, EventType, Metr
 
 
 class ExecutionEventIntent(BaseModel):
+    """Client intent for one mutable execution event.
+
+    The optimistic-lock version is mandatory at the API boundary.  This keeps
+    stale/offline writes explicit and prevents the service layer from having to
+    infer a concurrency policy from an omitted value.
+    """
+
     sync_uuid: UUID
     entity_type: EntityType
     entity_id: str = Field(min_length=1, max_length=255)
@@ -20,7 +27,7 @@ class ExecutionEventIntent(BaseModel):
     unit_of_measure: str | None = Field(default=None, max_length=50)
     occurred_at: datetime
     effective_date: datetime | None = None
-    expected_version: int | None = Field(default=None, ge=1)
+    expected_version: int = Field(ge=1)
     transaction_group_id: UUID | None = None
     reason: str | None = None
     notes: str | None = None
