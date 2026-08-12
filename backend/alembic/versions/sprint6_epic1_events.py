@@ -1,7 +1,7 @@
 """Sprint-6 Epic 1: Dynamic Progress and Event Log.
 
 Revision ID: sprint6_epic1_001
-Revises: sprint4_boq_001
+Revises: sprint5_rls_001
 Create Date: 2026-08-12
 """
 from alembic import op
@@ -9,7 +9,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 revision = "sprint6_epic1_001"
-down_revision = "sprint4_boq_001"
+down_revision = "sprint5_rls_001"
 branch_labels = None
 depends_on = None
 
