@@ -8,6 +8,7 @@ on:
       - fieldops-v4
       - fieldops-v4-platform-hardening
       - fieldops-v4-quality-lifecycle
+      - fieldops-v4-final-stabilization
       - 'feature/*'
       - 'hotfix/*'
   pull_request:
@@ -17,10 +18,11 @@ on:
       - fieldops-v4
       - fieldops-v4-platform-hardening
       - fieldops-v4-quality-lifecycle
+      - fieldops-v4-final-stabilization
 
 env:
   PYTHON_VERSION: "3.12"
-  NODE_VERSION: "20"
+  NODE_VERSION: "22"
   POSTGRES_VERSION: "16"
 
 jobs:
