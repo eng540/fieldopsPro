@@ -106,8 +106,6 @@ async def apply_event(
             },
         })
 
-    # The state row is locked before the version check. Therefore two writers for
-    # the same unit/BOQ cannot both advance the same version.
     old_state = {
         "completion_pct": state.completion_pct,
         "actual_quantity": state.actual_quantity,
@@ -189,7 +187,6 @@ async def apply_event(
             new_financial = numeric if event_type in {EventType.SNAPSHOT_SET, EventType.DATA_CORRECTION} else current + numeric
             if new_financial < 0:
                 raise HTTPException(status_code=422, detail="financial_value cannot be negative")
-
     else:
         raise HTTPException(status_code=422, detail=f"Unsupported event_type: {event_type.value}")
 
@@ -201,6 +198,19 @@ async def apply_event(
     event_id = str(uuid4())
     now = datetime.now(timezone.utc)
 
+    response = {
+        "event_id": event_id, "sync_uuid": sync_uuid,
+        "transaction_group_id": transaction_group_id,
+        "state_version": actual_version + 1, "current_state": new_state,
+    }
+
+    # The event row has a foreign key to event_sync_logs.operation_uuid.
+    # Register the idempotency row BEFORE flushing the event so the FK can be
+    # satisfied inside the same transaction. Both rows are committed atomically.
+    db.add(EventSyncLog(
+        org_id=org_id, operation_uuid=sync_uuid, status="PROCESSED",
+        response_payload=response,
+    ))
     db.add(ExecutionEvent(
         id=event_id, org_id=org_id, unit_id=unit_id,
         entity_type=entity_type, entity_id=entity_id,
@@ -222,21 +232,10 @@ async def apply_event(
     state.state_version = actual_version + 1
     state.last_event_id = event_id
     state.updated_by = user_id
-    await db.flush()
 
-    response = {
-        "event_id": event_id, "sync_uuid": sync_uuid,
-        "transaction_group_id": transaction_group_id,
-        "state_version": state.state_version, "current_state": new_state,
-    }
-    db.add(EventSyncLog(
-        org_id=org_id, operation_uuid=sync_uuid, status="PROCESSED",
-        response_payload=response,
-    ))
     try:
         await db.flush()
     except IntegrityError as exc:
-        # A duplicate can occur only when another transaction has already
-        # claimed the same sync UUID. The caller transaction is rolled back.
-        raise HTTPException(status_code=409, detail="Duplicate sync_uuid") from exc
+        raise HTTPException(status_code=409, detail="Duplicate sync_uuid or event constraint violation") from exc
+
     return response
