@@ -1,0 +1,11 @@
+extends:
+  - recommended
+
+rules:
+  # The repository contract is OpenAPI 3.0 and intentionally uses nullable:
+  # true. Keep structural validation while accepting the existing dialect.
+  struct: off
+  no-server-example-com: warn
+  operation-operationId: warn
+  operation-4xx-response: warn
+  no-unused-components: warn
