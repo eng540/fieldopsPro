@@ -2,11 +2,6 @@
 
 Revision ID: sprint7_quality_001
 Revises: sprint6_epic1_001
-
-Adds an immutable event ledger for QC remark status transitions. The existing
-remarks row remains the materialized current state for efficient reads; every
-transition is appended to remark_status_events and protected by a database
-trigger against UPDATE/DELETE.
 """
 from alembic import op
 import sqlalchemy as sa
@@ -20,7 +15,7 @@ depends_on = None
 def upgrade() -> None:
     op.create_table(
         "remark_status_events",
-        sa.Column("id", sa.BigInteger(), primary_key=True, autoincrement=True),
+        sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
         sa.Column("org_id", sa.Integer(), sa.ForeignKey("organizations.id"), nullable=False),
         sa.Column("remark_id", sa.String(36), sa.ForeignKey("remarks.id"), nullable=False),
         sa.Column("from_status", sa.String(20), nullable=True),
@@ -35,7 +30,6 @@ def upgrade() -> None:
     op.create_index("ix_remark_status_events_remark_id", "remark_status_events", ["remark_id"])
     op.create_index("ix_remark_status_events_occurred_at", "remark_status_events", ["occurred_at"])
 
-    # Database-level immutability: the ledger is append-only.
     op.execute("""
         CREATE OR REPLACE FUNCTION prevent_remark_status_event_mutation()
         RETURNS trigger AS $$
@@ -50,8 +44,6 @@ def upgrade() -> None:
         FOR EACH ROW EXECUTE FUNCTION prevent_remark_status_event_mutation();
     """)
 
-    # Tenant isolation for the new table. Unlike the legacy fallback policy,
-    # the API always establishes app.current_org_id before accessing org data.
     op.execute("ALTER TABLE remark_status_events ENABLE ROW LEVEL SECURITY;")
     op.execute("ALTER TABLE remark_status_events FORCE ROW LEVEL SECURITY;")
     op.execute("""
