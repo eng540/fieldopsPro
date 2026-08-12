@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
@@ -88,7 +88,6 @@ async def post_execution_events(
                 )
             results.append(ExecutionEventResult(**result))
         except HTTPException as exc:
-            # A single event must not abort successful siblings in the batch.
             results.append(ExecutionEventResult(
                 event_id="FAILED", sync_uuid=item.sync_uuid,
                 transaction_group_id=item.transaction_group_id,
