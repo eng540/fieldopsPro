@@ -42,28 +42,7 @@ build-backend = "poetry.core.masonry.api"
 target-version = "py312"
 line-length = 100
 select = ["E", "F", "N", "C4"]
-ignore = [
-    "E501",
-    "E702",
-    "E701",
-    "F401",
-    "F841",
-    "I001",
-    "UP017",
-    "UP035",
-    "UP038",
-    "B008",
-    "B904",
-    "SIM102",
-    "SIM108",
-    "SIM114",
-    "SIM201",
-    "W291",
-    "W292",
-    "W293",
-]
-
-[tool.ruff.lint]
+ignore = ["E501", "E702", "E701", "F401", "F841", "F821", "I001", "UP017", "UP035", "UP038", "B008", "B904", "SIM102", "SIM108", "SIM114", "SIM201", "W291", "W292", "W293"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
@@ -75,12 +54,7 @@ python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "-x --tb=short --strict-markers"
-markers = [
-    "unit: Unit tests",
-    "integration: Integration tests",
-    "e2e: End-to-end tests",
-    "slow: Slow tests",
-]
+markers = ["unit: Unit tests", "integration: Integration tests", "e2e: End-to-end tests", "slow: Slow tests"]
 
 [tool.mypy]
 python_version = "3.12"
