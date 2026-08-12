@@ -1,12 +1,12 @@
 """Quality Control Models — FieldOps V4.0.
 
-Remarks are the materialized current state. RemarkStatusEvent is the
-append-only lifecycle ledger and is never mutated after insertion.
+Remarks are materialized current state. RemarkStatusEvent is an immutable
+append-only lifecycle ledger.
 """
 from __future__ import annotations
 import enum
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
@@ -26,29 +26,15 @@ class RemarkStatus(str, enum.Enum):
     REWORK_REQUIRED = "REWORK_REQUIRED"
     RESUBMITTED = "RESUBMITTED"
     VERIFIED = "VERIFIED"
-    RESOLVED = "RESOLVED"  # legacy-compatible verification state
+    RESOLVED = "RESOLVED"
     CLOSED = "CLOSED"
 
 
 REMARK_STATUS_TRANSITIONS: dict[str, set[str]] = {
-    RemarkStatus.OPEN.value: {
-        RemarkStatus.IN_REVIEW.value,
-        RemarkStatus.REWORK_REQUIRED.value,
-    },
-    RemarkStatus.IN_REVIEW.value: {
-        RemarkStatus.REWORK_REQUIRED.value,
-        RemarkStatus.VERIFIED.value,
-        RemarkStatus.RESOLVED.value,
-    },
-    RemarkStatus.REWORK_REQUIRED.value: {
-        RemarkStatus.RESUBMITTED.value,
-        RemarkStatus.IN_REVIEW.value,
-    },
-    RemarkStatus.RESUBMITTED.value: {
-        RemarkStatus.IN_REVIEW.value,
-        RemarkStatus.REWORK_REQUIRED.value,
-        RemarkStatus.VERIFIED.value,
-    },
+    RemarkStatus.OPEN.value: {RemarkStatus.IN_REVIEW.value, RemarkStatus.REWORK_REQUIRED.value},
+    RemarkStatus.IN_REVIEW.value: {RemarkStatus.REWORK_REQUIRED.value, RemarkStatus.VERIFIED.value, RemarkStatus.RESOLVED.value},
+    RemarkStatus.REWORK_REQUIRED.value: {RemarkStatus.RESUBMITTED.value, RemarkStatus.IN_REVIEW.value},
+    RemarkStatus.RESUBMITTED.value: {RemarkStatus.IN_REVIEW.value, RemarkStatus.REWORK_REQUIRED.value, RemarkStatus.VERIFIED.value},
     RemarkStatus.VERIFIED.value: {RemarkStatus.CLOSED.value},
     RemarkStatus.RESOLVED.value: {RemarkStatus.CLOSED.value},
     RemarkStatus.CLOSED.value: set(),
@@ -57,7 +43,6 @@ REMARK_STATUS_TRANSITIONS: dict[str, set[str]] = {
 
 class RemarkTemplate(Base):
     __tablename__ = "remark_templates"
-
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     org_id: Mapped[int] = mapped_column(Integer, ForeignKey("organizations.id"), nullable=False)
     category: Mapped[str] = mapped_column(String(30), nullable=False)
@@ -68,16 +53,11 @@ class RemarkTemplate(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_by: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
     created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-
-    __table_args__ = (
-        Index("ix_remark_templates_org_id", "org_id"),
-        Index("ix_remark_templates_category", "category"),
-    )
+    __table_args__ = (Index("ix_remark_templates_org_id", "org_id"), Index("ix_remark_templates_category", "category"))
 
 
 class Remark(Base):
     __tablename__ = "remarks"
-
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     org_id: Mapped[int] = mapped_column(Integer, ForeignKey("organizations.id"), nullable=False)
     unit_id: Mapped[int] = mapped_column(Integer, ForeignKey("project_units.id"), nullable=False)
@@ -93,18 +73,14 @@ class Remark(Base):
     created_by: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
     created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     resolved_at: Mapped[object | None] = mapped_column(DateTime(timezone=True), nullable=True)
-
     __table_args__ = (
-        Index("ix_remarks_org_id", "org_id"),
-        Index("ix_remarks_unit_id", "unit_id"),
-        Index("ix_remarks_severity", "severity"),
-        Index("ix_remarks_status", "status"),
+        Index("ix_remarks_org_id", "org_id"), Index("ix_remarks_unit_id", "unit_id"),
+        Index("ix_remarks_severity", "severity"), Index("ix_remarks_status", "status"),
     )
 
 
 class RemarkStatusEvent(Base):
     __tablename__ = "remark_status_events"
-
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     org_id: Mapped[int] = mapped_column(Integer, ForeignKey("organizations.id"), nullable=False)
     remark_id: Mapped[str] = mapped_column(String(36), ForeignKey("remarks.id"), nullable=False)
@@ -114,8 +90,7 @@ class RemarkStatusEvent(Base):
     resolution_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     actor_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
     occurred_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    metadata: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
-
+    event_metadata: Mapped[dict] = mapped_column("metadata_json", JSON, nullable=False, default=dict)
     __table_args__ = (
         Index("ix_remark_status_events_org_id", "org_id"),
         Index("ix_remark_status_events_remark_id", "remark_id"),
