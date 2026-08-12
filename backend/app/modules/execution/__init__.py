@@ -1,14 +1,14 @@
 """FieldOps V4.0 — EXECUTION Module.
 
-Epic 1 adds an append-only execution event pipeline while retaining the
-legacy execution router for backward compatibility.
+Epic 1 adds an append-only execution event pipeline while preserving the
+legacy endpoint paths through event-backed compatibility handlers.
 """
-from fastapi import APIRouter
-
 from app.modules.execution.router import router
 from app.modules.execution.event_router import router as event_router
 
-# Mount Epic 1 endpoints into the existing execution namespace.
-router.include_router(event_router)
+# Put Epic 1 routes first so /progress and /bulk-progress cannot bypass the
+# event pipeline through the legacy handlers still present in router.py.
+for _route in reversed(event_router.routes):
+    router.routes.insert(0, _route)
 
 __all__ = ["router"]
