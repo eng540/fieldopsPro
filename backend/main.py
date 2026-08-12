@@ -7,11 +7,9 @@ from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
-from app.core.database import Base, engine
 
 from app.modules.iam import router as iam_router
 from app.modules.execution import router as execution_router
-from app.modules.execution import event_query as execution_event_query_router
 from app.modules.sync import router as sync_router
 from app.modules.projects import router as projects_router
 from app.modules.quality import router as quality_router
@@ -49,12 +47,9 @@ app.add_middleware(
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(iam_router, prefix="/auth", tags=["Authentication & IAM"])
 api_router.include_router(projects_router, prefix="/projects", tags=["Projects & Units"])
+# execution.__init__ assembles the mutation router plus read-only event/state/
+# aggregation routes; register the composed router once to avoid duplicate paths.
 api_router.include_router(execution_router, prefix="/execution", tags=["Field Execution"])
-api_router.include_router(
-    execution_event_query_router.router,
-    prefix="/execution",
-    tags=["Execution Event History"],
-)
 api_router.include_router(sync_router, prefix="/sync", tags=["Sync Engine"])
 api_router.include_router(quality_router, prefix="/quality", tags=["Quality Control"])
 api_router.include_router(governance_router, prefix="/governance", tags=["Governance Engine"])
