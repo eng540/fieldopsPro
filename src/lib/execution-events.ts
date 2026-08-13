@@ -6,27 +6,61 @@ export interface ExecutionEventIntent {
   sync_uuid: string
   entity_type: 'BOQ_ITEM'
   entity_id: string
+  unit_id: number
+  boq_item_id: number
   event_class: 'PROGRESS'
   event_type: 'DELTA_ADD' | 'REWORK'
   metric_type: 'PERCENTAGE'
-  value: { pct: number }
+  value: number
   occurred_at: string
   expected_version: number
+  transaction_group_id?: string
   reason?: string
+  notes?: string
 }
 
-export function createProgressIntent(input: Omit<ExecutionEventIntent, 'sync_uuid' | 'occurred_at'>): ExecutionEventIntent {
-  return { ...input, sync_uuid: uuidv4(), occurred_at: new Date().toISOString() }
+export interface ExecutionEventResult {
+  event_id: string
+  sync_uuid: string
+  transaction_group_id?: string | null
+  state_version: number
+  current_state: Record<string, unknown>
 }
 
-export async function submitExecutionEvents(events: ExecutionEventIntent[]) {
-  const token = typeof window !== 'undefined' ? JSON.parse(localStorage.getItem('fieldops-auth') || '{}')?.state?.tokens?.accessToken : null
+export interface ExecutionEventsResponse { results: ExecutionEventResult[] }
+
+function getAccessToken(): string | null {
+  if (typeof window === 'undefined') return null
+  try { return JSON.parse(localStorage.getItem('fieldops-auth') || '{}')?.state?.tokens?.accessToken || null } catch { return null }
+}
+
+export function createProgressIntent(input: { unitId: string | number; boqItemId: string | number; expectedVersion: number; deltaPct: number; rework?: boolean; reason?: string; transactionGroupId?: string }): ExecutionEventIntent {
+  const unitId = Number(input.unitId), boqItemId = Number(input.boqItemId)
+  if (!Number.isInteger(unitId) || unitId <= 0) throw new Error('unitId must be a positive integer')
+  if (!Number.isInteger(boqItemId) || boqItemId <= 0) throw new Error('boqItemId must be a positive integer')
+  if (!Number.isInteger(input.expectedVersion) || input.expectedVersion < 1) throw new Error('expectedVersion must be >= 1')
+  if (!Number.isFinite(input.deltaPct) || input.deltaPct === 0) throw new Error('deltaPct must be non-zero')
+  if (input.rework && (!input.reason || input.reason.trim().length < 20)) throw new Error('سبب الإعادة يجب أن يكون 20 حرفاً على الأقل')
+  return {
+    sync_uuid: uuidv4(), entity_type: 'BOQ_ITEM', entity_id: String(boqItemId), unit_id: unitId, boq_item_id: boqItemId,
+    event_class: 'PROGRESS', event_type: input.rework ? 'REWORK' : 'DELTA_ADD', metric_type: 'PERCENTAGE', value: input.deltaPct,
+    occurred_at: new Date().toISOString(), expected_version: input.expectedVersion,
+    ...(input.transactionGroupId ? { transaction_group_id: input.transactionGroupId } : {}),
+    ...(input.reason ? { reason: input.reason.trim() } : {}),
+  }
+}
+
+export async function submitExecutionEvents(events: ExecutionEventIntent[], transactionGroupId?: string): Promise<ExecutionEventsResponse> {
+  if (!events.length) return { results: [] }
+  const token = getAccessToken()
+  if (!token) throw new Error('انتهت جلسة الدخول. يرجى تسجيل الدخول مرة أخرى.')
   const response = await fetch(`${API_BASE}/execution/events`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-    body: JSON.stringify({ events }),
+    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ events: events.map(e => transactionGroupId && !e.transaction_group_id ? { ...e, transaction_group_id: transactionGroupId } : e) }),
   })
   const data = await response.json().catch(() => ({}))
-  if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`)
-  return data
+  if (response.status === 401) throw new Error('انتهت جلسة الدخول. يرجى تسجيل الدخول مرة أخرى.')
+  if (!response.ok) throw new Error(typeof data?.detail === 'string' ? data.detail : `فشل إرسال الأحداث (HTTP ${response.status})`)
+  if (!Array.isArray(data?.results)) throw new Error('استجابة غير صالحة من محرك التنفيذ')
+  return data as ExecutionEventsResponse
 }
