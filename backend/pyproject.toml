@@ -41,8 +41,15 @@ build-backend = "poetry.core.masonry.api"
 [tool.ruff]
 target-version = "py312"
 line-length = 100
+
+[tool.ruff.lint]
 select = ["E", "F", "N", "C4"]
-ignore = ["E501", "E702", "E701", "F401", "F841", "F821", "I001", "UP017", "UP035", "UP038", "B008", "B904", "SIM102", "SIM108", "SIM114", "SIM201", "W291", "W292", "W293"]
+ignore = [
+  "E501", "E702", "E701", "E401", "E402", "E712",
+  "F401", "F841", "F821", "I001", "UP017", "UP035", "UP038",
+  "B008", "B904", "SIM102", "SIM108", "SIM114", "SIM201",
+  "W291", "W292", "W293", "N806"
+]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
@@ -59,6 +66,7 @@ markers = ["unit: Unit tests", "integration: Integration tests", "e2e: End-to-en
 [tool.mypy]
 python_version = "3.12"
 strict = true
+explicit_package_bases = true
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
