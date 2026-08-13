@@ -16,10 +16,8 @@ from app.modules.execution.models import (
     ExecutionEvent,
     EventType,
     MetricType,
-    MONOTONIC_STATUS_TRANSITIONS,
     UnitBoQProgress,
     UnitBoQProgressStatus,
-    WorkOrderStatus,
 )
 from app.modules.execution.schemas import EventConflictDetails, EventIntent, EventResponse
 
@@ -34,6 +32,30 @@ class BusinessRuleError(Exception):
     pass
 
 
+# BOQ progress has its own lifecycle. It must not reuse WorkOrderStatus transitions.
+_BOQ_STATUS_TRANSITIONS: dict[str, set[str]] = {
+    UnitBoQProgressStatus.NOT_STARTED.value: {
+        UnitBoQProgressStatus.NOT_STARTED.value,
+        UnitBoQProgressStatus.IN_PROGRESS.value,
+        UnitBoQProgressStatus.COMPLETED.value,
+    },
+    UnitBoQProgressStatus.IN_PROGRESS.value: {
+        UnitBoQProgressStatus.IN_PROGRESS.value,
+        UnitBoQProgressStatus.COMPLETED.value,
+        UnitBoQProgressStatus.REWORK_REQUIRED.value,
+    },
+    UnitBoQProgressStatus.REWORK_REQUIRED.value: {
+        UnitBoQProgressStatus.REWORK_REQUIRED.value,
+        UnitBoQProgressStatus.IN_PROGRESS.value,
+        UnitBoQProgressStatus.COMPLETED.value,
+    },
+    UnitBoQProgressStatus.COMPLETED.value: {
+        UnitBoQProgressStatus.COMPLETED.value,
+        UnitBoQProgressStatus.REWORK_REQUIRED.value,
+    },
+}
+
+
 def _require_uuid(value: str, field_name: str) -> str:
     try:
         UUID(value)
@@ -44,20 +66,23 @@ def _require_uuid(value: str, field_name: str) -> str:
 
 def _number(value: Any, key: str) -> float:
     try:
-        return float(value[key])
+        number = float(value[key])
     except (KeyError, TypeError, ValueError) as exc:
         raise BusinessRuleError(f"value.{key} must be numeric.") from exc
+    if number != number or number in (float("inf"), float("-inf")):
+        raise BusinessRuleError(f"value.{key} must be finite.")
+    return number
 
 
 def _validate_status_transition(current: str, requested: str) -> str:
-    try:
-        current_enum = WorkOrderStatus(current)
-        requested_enum = WorkOrderStatus(requested)
-    except ValueError as exc:
-        raise BusinessRuleError(f"Invalid status transition value: {current} -> {requested}") from exc
-    if requested_enum != current_enum and requested_enum not in MONOTONIC_STATUS_TRANSITIONS.get(current_enum, []):
-        raise BusinessRuleError(f"Invalid status transition: {current_enum.value} -> {requested_enum.value}.")
-    return requested_enum.value
+    allowed = _BOQ_STATUS_TRANSITIONS.get(current)
+    if allowed is None:
+        raise BusinessRuleError(f"Unknown BOQ status: {current}.")
+    if requested not in _BOQ_STATUS_TRANSITIONS:
+        raise BusinessRuleError(f"Invalid BOQ status: {requested}.")
+    if requested not in allowed:
+        raise BusinessRuleError(f"Invalid BOQ status transition: {current} -> {requested}.")
+    return requested
 
 
 async def initialize_boq_state(
@@ -68,11 +93,7 @@ async def initialize_boq_state(
     boq_item_id: int,
     user_id: int,
 ) -> UnitBoQProgress:
-    """Create a new BOQ read-model row together with its INITIAL_STATE event.
-
-    This is the only supported path for introducing a new BOQ state after the
-    migration baseline. It keeps the event ledger and read model consistent.
-    """
+    """Create a new BOQ read-model row together with its INITIAL_STATE event."""
     existing = await db.execute(
         select(UnitBoQProgress)
         .where(
@@ -202,23 +223,24 @@ async def process_event_intent(
         )
 
     if current_state.state_version != intent.expected_version:
-        conflict = EventConflictDetails(
-            sync_uuid=intent.sync_uuid,
-            expected_version=intent.expected_version,
-            actual_version=current_state.state_version,
-            current_state={
-                "unit_id": current_state.unit_id,
-                "boq_item_id": current_state.boq_item_id,
-                "completion_pct": current_state.completion_pct,
-                "actual_quantity": current_state.actual_quantity,
-                "status": current_state.status,
-                "state_version": current_state.state_version,
-                "last_event_id": current_state.last_event_id,
-                "updated_by": current_state.updated_by,
-                "updated_at": current_state.updated_at.isoformat(),
-            },
+        raise ConcurrentModificationError(
+            EventConflictDetails(
+                sync_uuid=intent.sync_uuid,
+                expected_version=intent.expected_version,
+                actual_version=current_state.state_version,
+                current_state={
+                    "unit_id": current_state.unit_id,
+                    "boq_item_id": current_state.boq_item_id,
+                    "completion_pct": current_state.completion_pct,
+                    "actual_quantity": current_state.actual_quantity,
+                    "status": current_state.status,
+                    "state_version": current_state.state_version,
+                    "last_event_id": current_state.last_event_id,
+                    "updated_by": current_state.updated_by,
+                    "updated_at": current_state.updated_at.isoformat(),
+                },
+            )
         )
-        raise ConcurrentModificationError(conflict)
 
     previous_value = {
         "pct": current_state.completion_pct,
@@ -259,18 +281,15 @@ async def process_event_intent(
         if not intent.reason or len(intent.reason.strip()) < 20:
             raise BusinessRuleError("REWORK requires a detailed reason of at least 20 characters.")
         if intent.metric_type == MetricType.PERCENTAGE:
-            delta = abs(_number(intent.value, "pct"))
-            new_pct = max(0.0, current_state.completion_pct - delta)
+            new_pct = max(0.0, current_state.completion_pct - abs(_number(intent.value, "pct")))
         elif intent.metric_type == MetricType.QUANTITY:
-            delta = abs(_number(intent.value, "qty"))
-            new_qty = max(0.0, (current_state.actual_quantity or 0.0) - delta)
+            new_qty = max(0.0, (current_state.actual_quantity or 0.0) - abs(_number(intent.value, "qty")))
         else:
             raise BusinessRuleError("REWORK supports PERCENTAGE or QUANTITY only.")
         new_status = UnitBoQProgressStatus.REWORK_REQUIRED.value
 
     elif intent.event_type == EventType.STATUS_CHANGE:
-        requested = str(intent.value.get("status", ""))
-        new_status = _validate_status_transition(current_state.status, requested)
+        new_status = _validate_status_transition(current_state.status, str(intent.value.get("status", "")))
 
     elif intent.event_type == EventType.INITIAL_STATE:
         raise BusinessRuleError("INITIAL_STATE is reserved for controlled initialization/migration.")
@@ -288,7 +307,6 @@ async def process_event_intent(
     event_id = str(uuid4())
     server_now = datetime.now(timezone.utc)
     new_value = {"pct": new_pct, "qty": new_qty, "status": new_status}
-
     db.add(
         ExecutionEvent(
             id=event_id,
@@ -337,12 +355,10 @@ async def process_event_intent(
             response_payload=response_payload,
         )
     )
-
     try:
         await db.flush()
     except IntegrityError as exc:
         raise BusinessRuleError(
             "Event could not be committed because its sync_uuid already exists. Retry the request."
         ) from exc
-
     return EventResponse(**response_payload)
