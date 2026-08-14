@@ -1,700 +1,145 @@
-// --- START OF FILE src/lib/api-client.ts ---
+// FieldOps V4 — API Client
+// Centralized authenticated transport for the FastAPI backend.
 
-// FieldOps V4 — API Client (FastAPI Wired)
-// All requests go to FastAPI backend. No mock API routes.
+import { db, getPendingSyncItems, updateSyncQueueItem, clearCompletedSyncItems, getPendingSyncCount } from './offline-db'
+import { useAuthStore } from './auth-store'
 
-import {
-  db, addToSyncQueue, getPendingSyncItems, updateSyncQueueItem,
-  clearCompletedSyncItems, getPendingSyncCount,
-} from './offline-db'
-
-// ============================================================
-// Types
-// ============================================================
-
-export interface ApiResponse<T = unknown> {
-  success: boolean
-  data?: T
-  error?: string
-  fromCache?: boolean
-  syncedAt?: number
-}
-
-export interface SyncStatus {
-  isOnline: boolean
-  isSyncing: boolean
-  pendingCount: number
-  lastSyncAt: number | null
-  errors: string[]
-}
-
-// ============================================================
-// Configuration
-// ============================================================
+export interface ApiResponse<T = unknown> { success: boolean; data?: T; error?: string; fromCache?: boolean; syncedAt?: number }
+export interface SyncStatus { isOnline: boolean; isSyncing: boolean; pendingCount: number; lastSyncAt: number | null; errors: string[] }
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'
-
-function getAccessToken(): string | null {
-  if (typeof window === 'undefined') return null
-  try {
-    const authData = localStorage.getItem('fieldops-auth')
-    if (!authData) return null
-    const parsed = JSON.parse(authData)
-    return parsed?.state?.tokens?.accessToken || null
-  } catch {
-    return null
-  }
-}
-
-// ============================================================
-// Network Detection
-// ============================================================
+function getAccessToken(): string | null { return useAuthStore.getState().tokens?.accessToken || null }
 
 let onlineStatus = typeof window !== 'undefined' ? navigator.onLine : true
 const onlineListeners: Set<(online: boolean) => void> = new Set()
-
 if (typeof window !== 'undefined') {
-  window.addEventListener('online', () => {
-    onlineStatus = true
-    onlineListeners.forEach(fn => fn(true))
-    processSyncQueue()
-  })
-  window.addEventListener('offline', () => {
-    onlineStatus = false
-    onlineListeners.forEach(fn => fn(false))
-  })
+  window.addEventListener('online', () => { onlineStatus = true; onlineListeners.forEach(fn => fn(true)); processSyncQueue() })
+  window.addEventListener('offline', () => { onlineStatus = false; onlineListeners.forEach(fn => fn(false)) })
 }
+export function isOnline(): boolean { return onlineStatus }
+export function onOnlineStatusChange(listener: (online: boolean) => void): () => void { onlineListeners.add(listener); return () => onlineListeners.delete(listener) }
 
-export function isOnline(): boolean {
-  return onlineStatus
-}
-
-export function onOnlineStatusChange(listener: (online: boolean) => void): () => void {
-  onlineListeners.add(listener)
-  return () => onlineListeners.delete(listener)
-}
-
-// ============================================================
-// API Client — FastAPI Backend Only
-// ============================================================
-
-async function apiRequest<T>(
-  endpoint: string,
-  options: RequestInit = {},
-  fallbackToCache: boolean = true
-): Promise<ApiResponse<T>> {
-  if (!onlineStatus && fallbackToCache) {
-    return { success: false, error: 'OFFLINE', fromCache: false }
-  }
-
+async function requestOnce(endpoint: string, options: RequestInit = {}): Promise<Response> {
   const token = getAccessToken()
+  return fetch(`${API_BASE}${endpoint}`, {
+    ...options,
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...options.headers,
+    },
+  })
+}
 
+async function apiRequest<T>(endpoint: string, options: RequestInit = {}, fallbackToCache = true): Promise<ApiResponse<T>> {
+  if (!onlineStatus && fallbackToCache) return { success: false, error: 'OFFLINE', fromCache: false }
   try {
-    const res = await fetch(`${API_BASE}${endpoint}`, {
-      ...options,
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
-        ...options.headers,
-      },
-    })
-
+    let res = await requestOnce(endpoint, options)
     if (res.status === 401) {
-      return { success: false, error: 'UNAUTHORIZED' }
+      // Exactly one refresh attempt. The auth store serializes concurrent refreshes,
+      // preventing a burst of expired requests from creating a refresh storm.
+      try {
+        await useAuthStore.getState().refreshAccessToken()
+        res = await requestOnce(endpoint, options)
+      } catch {
+        return { success: false, error: 'UNAUTHORIZED' }
+      }
+      if (res.status === 401) return { success: false, error: 'UNAUTHORIZED' }
     }
-
     if (!res.ok) {
       const errorData = await res.json().catch(() => ({}))
       return { success: false, error: errorData.detail || errorData.error || `HTTP ${res.status}` }
     }
-
-    const data = await res.json()
-    return { success: true, data }
+    return { success: true, data: await res.json() }
   } catch (error) {
-    if (!onlineStatus && fallbackToCache) {
-      return { success: false, error: 'OFFLINE', fromCache: false }
-    }
+    if (!onlineStatus && fallbackToCache) return { success: false, error: 'OFFLINE', fromCache: false }
     return { success: false, error: String(error) }
   }
 }
 
-// ============================================================
-// File Upload Client — Multipart to FastAPI
-// ============================================================
-
-async function uploadFile(
-  endpoint: string,
-  files: File[],
-  extraFields?: Record<string, string>
-): Promise<ApiResponse<{ uploaded: number; urls: string[] }>> {
-  if (!onlineStatus) {
-    return { success: false, error: 'OFFLINE' }
-  }
-
-  const token = getAccessToken()
+async function uploadFile(endpoint: string, files: File[], extraFields?: Record<string, string>): Promise<ApiResponse<{ uploaded: number; urls: string[] }>> {
+  if (!onlineStatus) return { success: false, error: 'OFFLINE' }
   const formData = new FormData()
-
-  for (const file of files) {
-    formData.append('files', file)
-  }
-
-  if (extraFields) {
-    for (const [key, value] of Object.entries(extraFields)) {
-      formData.append(key, value)
-    }
-  }
-
+  for (const file of files) formData.append('files', file)
+  if (extraFields) for (const [key, value] of Object.entries(extraFields)) formData.append(key, value)
+  const send = () => fetch(`${API_BASE}${endpoint}`, {
+    method: 'POST', credentials: 'include',
+    headers: { ...(getAccessToken() ? { Authorization: `Bearer ${getAccessToken()}` } : {}) }, body: formData,
+  })
   try {
-    const res = await fetch(`${API_BASE}${endpoint}`, {
-      method: 'POST',
-      headers: {
-        ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
-      },
-      body: formData,
-    })
-
-    if (!res.ok) {
-      const errorData = await res.json().catch(() => ({}))
-      return { success: false, error: errorData.detail || `HTTP ${res.status}` }
+    let res = await send()
+    if (res.status === 401) {
+      await useAuthStore.getState().refreshAccessToken()
+      res = await send()
     }
-
-    const data = await res.json()
-    return { success: true, data }
-  } catch (error) {
-    return { success: false, error: String(error) }
-  }
+    if (!res.ok) { const e = await res.json().catch(() => ({})); return { success: false, error: e.detail || `HTTP ${res.status}` } }
+    return { success: true, data: await res.json() }
+  } catch (error) { return { success: false, error: String(error) } }
 }
-
-// ============================================================
-// Sync Engine — Wired to FastAPI /sync/push and /sync/pull
-// ============================================================
 
 let isSyncing = false
 let syncErrors: string[] = []
 const syncListeners: Set<(status: SyncStatus) => void> = new Set()
+function notifySyncListeners(pendingCount: number) { syncListeners.forEach(fn => fn({ isOnline: onlineStatus, isSyncing, pendingCount, lastSyncAt: null, errors: [...syncErrors] })) }
+export function onSyncStatusChange(listener: (status: SyncStatus) => void): () => void { syncListeners.add(listener); return () => syncListeners.delete(listener) }
 
-function notifySyncListeners(pendingCount: number) {
-  const status: SyncStatus = {
-    isOnline: onlineStatus,
-    isSyncing,
-    pendingCount,
-    lastSyncAt: null,
-    errors: [...syncErrors],
-  }
-  syncListeners.forEach(fn => fn(status))
-}
-
-export function onSyncStatusChange(listener: (status: SyncStatus) => void): () => void {
-  syncListeners.add(listener)
-  return () => syncListeners.delete(listener)
-}
-
-// ============================================================
-// processSyncQueue — Pushes pending operations to FastAPI /sync/push
-// ============================================================
-
-export async function processSyncQueue(): Promise<{
-  processed: number
-  failed: number
-  remaining: number
-  conflicts: Array<{
-    operation_uuid: string
-    conflict_type: string
-    server_value: Record<string, unknown>
-    client_value: Record<string, unknown>
-    resolution_hint: string
-  }>
-}> {
+export async function processSyncQueue(): Promise<{ processed: number; failed: number; remaining: number; conflicts: any[] }> {
   if (isSyncing || !onlineStatus) return { processed: 0, failed: 0, remaining: 0, conflicts: [] }
-
-  isSyncing = true
-  syncErrors = []
-  let processed = 0
-  let failed = 0
-  const allConflicts: Array<any> = []
-
+  isSyncing = true; syncErrors = []; let processed = 0; let failed = 0; const conflicts: any[] = []
   try {
-    const pendingItems = await getPendingSyncItems()
-    notifySyncListeners(pendingItems.length)
-
-    if (pendingItems.length === 0) {
-      isSyncing = false
-      return { processed: 0, failed: 0, remaining: 0, conflicts: [] }
-    }
-
-    const operations = pendingItems.map(item => {
-      const payload = JSON.parse(item.payload)
-      return {
-        operation_uuid: item.operationUuid,
-        operation_type: item.operationType,
-        entity_type: _mapEntityType(item.entityType),
-        entity_id: _extractEntityId(payload, item),
-        payload: payload,
-        device_timestamp: new Date(item.createdAt).toISOString(),
-      }
-    })
-
-    const token = getAccessToken()
-    const res = await fetch(`${API_BASE}/sync/push`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
-      },
-      body: JSON.stringify({ operations }),
-    })
-
+    const pendingItems = await getPendingSyncItems(); notifySyncListeners(pendingItems.length)
+    if (!pendingItems.length) return { processed: 0, failed: 0, remaining: 0, conflicts: [] }
+    const operations = pendingItems.map(item => { const payload = JSON.parse(item.payload); return { operation_uuid: item.operationUuid, operation_type: item.operationType, entity_type: _mapEntityType(item.entityType), entity_id: _extractEntityId(payload, item), payload, device_timestamp: new Date(item.createdAt).toISOString() } })
+    const send = () => fetch(`${API_BASE}/sync/push`, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', ...(getAccessToken() ? { Authorization: `Bearer ${getAccessToken()}` } : {}) }, body: JSON.stringify({ operations }) })
+    let res = await send()
+    if (res.status === 401) { await useAuthStore.getState().refreshAccessToken(); res = await send() }
     if (res.ok || res.status === 207) {
       const data = await res.json()
-
-      for (const uuid of (data.processed || [])) {
-        const item = pendingItems.find(i => i.operationUuid === uuid)
-        if (item?.id) {
-          await updateSyncQueueItem(item.id, {
-            status: 'COMPLETED',
-            processedAt: Date.now(),
-          })
-          processed++
-        }
-      }
-
-      for (const conflict of (data.conflicts || [])) {
-        const item = pendingItems.find(i => i.operationUuid === conflict.operation_uuid)
-        if (item?.id) {
-          await updateSyncQueueItem(item.id, {
-            status: 'CONFLICT',
-            lastError: `${conflict.conflict_type}: ${conflict.resolution_hint}`,
-            serverData: conflict.server_value || null,
-          })
-          failed++
-        }
-        allConflicts.push(conflict)
-        syncErrors.push(`${conflict.conflict_type}: ${conflict.resolution_hint}`)
-      }
-
+      for (const uuid of data.processed || []) { const item = pendingItems.find(i => i.operationUuid === uuid); if (item?.id) { await updateSyncQueueItem(item.id, { status: 'COMPLETED', processedAt: Date.now() }); processed++ } }
+      for (const conflict of data.conflicts || []) { const item = pendingItems.find(i => i.operationUuid === conflict.operation_uuid); if (item?.id) { await updateSyncQueueItem(item.id, { status: 'CONFLICT', lastError: `${conflict.conflict_type}: ${conflict.resolution_hint}`, serverData: conflict.server_value || null }); failed++ } conflicts.push(conflict); syncErrors.push(`${conflict.conflict_type}: ${conflict.resolution_hint}`) }
       await clearCompletedSyncItems()
     } else if (res.status === 409) {
-      const data = await res.json()
-      for (const conflict of (data.conflicts || [])) {
-        const item = pendingItems.find(i => i.operationUuid === conflict.operation_uuid)
-        if (item?.id) {
-          await updateSyncQueueItem(item.id, {
-            status: 'CONFLICT',
-            lastError: `${conflict.conflict_type}: ${conflict.resolution_hint}`,
-          })
-          failed++
-        }
-        allConflicts.push(conflict)
-        syncErrors.push(`BLOCKED: ${conflict.resolution_hint}`)
-      }
+      const data = await res.json(); for (const conflict of data.conflicts || []) { const item = pendingItems.find(i => i.operationUuid === conflict.operation_uuid); if (item?.id) await updateSyncQueueItem(item.id, { status: 'CONFLICT', lastError: `${conflict.conflict_type}: ${conflict.resolution_hint}` }); failed++; conflicts.push(conflict); syncErrors.push(`BLOCKED: ${conflict.resolution_hint}`) }
     } else {
-      for (const item of pendingItems) {
-        await updateSyncQueueItem(item.id!, {
-          status: 'PENDING',
-          retryCount: item.retryCount + 1,
-          lastError: `HTTP ${res.status}`,
-        })
-      }
+      for (const item of pendingItems) await updateSyncQueueItem(item.id!, { status: 'PENDING', retryCount: item.retryCount + 1, lastError: `HTTP ${res.status}` })
     }
-  } catch (err) {
-    syncErrors.push(String(err))
-  } finally {
-    isSyncing = false
-    const remaining = await getPendingSyncCount()
-    notifySyncListeners(remaining)
-  }
-
-  return {
-    processed,
-    failed,
-    remaining: await getPendingSyncCount(),
-    conflicts: allConflicts,
-  }
+  } catch (err) { syncErrors.push(String(err)) }
+  finally { isSyncing = false; notifySyncListeners(await getPendingSyncCount()) }
+  return { processed, failed, remaining: await getPendingSyncCount(), conflicts }
 }
 
-// ============================================================
-// fullDataSync — Pull from FastAPI /sync/pull
-// ============================================================
-
-export async function fullDataSync(orgId: string): Promise<{
-  success: boolean
-  synced: { projects: number; users: number; remarks: number; auditLogs: number; dictionaries: number }
-  errors: string[]
-}> {
-  const errors: string[] = []
-  const synced = { projects: 0, users: 0, remarks: 0, auditLogs: 0, dictionaries: 0 }
-
-  if (!onlineStatus) {
-    return { success: false, synced, errors: ['OFFLINE'] }
-  }
-
-  isSyncing = true
-  notifySyncListeners(0)
-
+export async function fullDataSync(orgId: string): Promise<{ success: boolean; synced: { projects: number; users: number; remarks: number; auditLogs: number; dictionaries: number }; errors: string[] }> {
+  const errors: string[] = []; const synced = { projects: 0, users: 0, remarks: 0, auditLogs: 0, dictionaries: 0 }
+  if (!onlineStatus) return { success: false, synced, errors: ['OFFLINE'] }
+  isSyncing = true; notifySyncListeners(0)
   try {
-    const token = getAccessToken()
-
-    const pullRes = await fetch(`${API_BASE}/sync/pull`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
-      },
-      body: JSON.stringify({
-        last_sync_version: null, 
-      }),
-    })
-
-    if (pullRes.ok) {
-      const pullData = await pullRes.json()
-      if (pullData.bundle?.work_orders) {
-        for (const wo of pullData.bundle.work_orders) {
-          await db.boqProgress.put({
-            id: `wo-${wo.id}`,
-            orgId: String(wo.org_id),
-            unitId: String(wo.project_id),
-            boqItemId: `wo-${wo.id}`,
-            completionPct: wo.completion_pct,
-            status: wo.status,
-            measuredQuantity: null,
-            reworkFlag: wo.rework_flag,
-            reworkReason: null,
-            reworkAuthorizedBy: null,
-            updatedBy: null,
-            pendingSync: false,
-            lastSyncedAt: Date.now(),
-          })
-        }
-        synced.projects = pullData.bundle.work_orders.length
-      }
-    } else errors.push('sync/pull: ' + String(pullRes.status))
-
-    const [userRes, remarkRes, auditRes] = await Promise.all([
-      apiRequest<{ items: unknown[] }>(`/auth/users`),
-      apiRequest<{ items: unknown[] }>(`/quality/remarks`),
-      apiRequest<{ items: unknown[] }>(`/auth/audit?page_size=100`),
-    ])
-
-    if (userRes.success && userRes.data) synced.users = (userRes.data as any).length || 0
-    else errors.push('users: ' + (userRes.error || 'unknown'))
-
-    if (remarkRes.success && remarkRes.data) synced.remarks = (remarkRes.data as any).length || 0
-    else errors.push('remarks: ' + (remarkRes.error || 'unknown'))
-
-    if (auditRes.success && auditRes.data) synced.auditLogs = (auditRes.data as any).length || 0
-    else errors.push('audit: ' + (auditRes.error || 'unknown'))
-
-    await processSyncQueue()
-
-    return { success: errors.length === 0, synced, errors }
-  } catch (err) {
-    errors.push(String(err))
-    return { success: false, synced, errors }
-  } finally {
-    isSyncing = false
-    const remaining = await getPendingSyncCount()
-    notifySyncListeners(remaining)
-  }
+    const pull = await apiRequest<any>('/sync/pull', { method: 'POST', body: JSON.stringify({ last_sync_version: null }) })
+    if (pull.success) {
+      for (const wo of pull.data?.bundle?.work_orders || []) await db.boqProgress.put({ id: `wo-${wo.id}`, orgId: String(wo.org_id), unitId: String(wo.project_id), boqItemId: `wo-${wo.id}`, completionPct: wo.completion_pct, status: wo.status, measuredQuantity: null, reworkFlag: wo.rework_flag, reworkReason: null, reworkAuthorizedBy: null, updatedBy: null, pendingSync: false, lastSyncedAt: Date.now() })
+      synced.projects = pull.data?.bundle?.work_orders?.length || 0
+    } else errors.push('sync/pull: ' + (pull.error || 'unknown'))
+    const [users, remarks, audit] = await Promise.all([apiRequest<any>('/auth/users'), apiRequest<any>('/quality/remarks'), apiRequest<any>('/auth/audit?page_size=100')])
+    if (users.success) synced.users = Array.isArray(users.data) ? users.data.length : users.data?.items?.length || 0; else errors.push('users: ' + (users.error || 'unknown'))
+    if (remarks.success) synced.remarks = Array.isArray(remarks.data) ? remarks.data.length : remarks.data?.items?.length || 0; else errors.push('remarks: ' + (remarks.error || 'unknown'))
+    if (audit.success) synced.auditLogs = Array.isArray(audit.data) ? audit.data.length : audit.data?.items?.length || 0; else errors.push('audit: ' + (audit.error || 'unknown'))
+    await processSyncQueue(); return { success: errors.length === 0, synced, errors }
+  } catch (err) { errors.push(String(err)); return { success: false, synced, errors } }
+  finally { isSyncing = false; notifySyncListeners(await getPendingSyncCount()) }
 }
 
-// ============================================================
-// Hybrid Data Access — SAFE MAPPING LAYER (Bulletproof Fix)
-// ============================================================
+export async function getProjectsHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> { const r = await apiRequest<any>(`/projects?org_id=${encodeURIComponent(orgId)}`); if (r.success && r.data) return { data: r.data.projects || r.data.items || r.data, fromCache: false }; return { data: await getLocalProjects(), fromCache: true } }
+export async function getRemarksHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> { const r = await apiRequest<any>('/quality/remarks'); if (r.success && r.data) return { data: r.data.items || r.data, fromCache: false }; return { data: await getLocalRemarks(), fromCache: true } }
+export async function getUsersHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> { const r = await apiRequest<any>('/auth/users'); if (r.success && r.data) return { data: Array.isArray(r.data) ? r.data : r.data.users || r.data.items || [], fromCache: false }; return { data: await getLocalUsers(), fromCache: true } }
+export async function getAuditLogsHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> { const r = await apiRequest<any>('/auth/audit?page_size=100'); if (r.success && r.data) return { data: r.data.items || r.data, fromCache: false }; return { data: await getLocalAuditLogs(), fromCache: true } }
+export async function getDictionariesHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> { const r = await apiRequest<any>(`/projects/dictionaries?org_id=${encodeURIComponent(orgId)}`); if (r.success && r.data) return { data: r.data.dictionaries || r.data.items || r.data, fromCache: false }; return { data: await getLocalDictionaries(), fromCache: true } }
 
-export async function getProjectsHybrid(orgId: string): Promise<{
-  data: any[]; fromCache: boolean
-}> {
-  if (onlineStatus) {
-    try {
-      const res = await apiRequest<any>(`/projects?org_id=${orgId}`)
-      if (res.success && res.data) {
-        let items = res.data.projects || res.data.items || res.data;
-        if (!Array.isArray(items)) items = [];
-        
-        // SAFE MAPPING: Convert snake_case to camelCase and ensure arrays exist
-        const mappedItems = items.map((p: any) => ({
-          id: String(p.id),
-          orgId: String(p.org_id || p.orgId || ''),
-          name: p.name || '',
-          code: p.code || '',
-          status: p.status || 'NOT_STARTED',
-          location: p.location || null,
-          totalUnits: p.total_units || p.totalUnits || 0,
-          completionPct: p.completion_pct || p.completionPct || 0,
-          isActive: p.is_active ?? p.isActive ?? true,
-          units: Array.isArray(p.units) ? p.units.map((u: any) => ({
-            id: String(u.id),
-            orgId: String(u.org_id || u.orgId || ''),
-            projectId: String(u.project_id || u.projectId || ''),
-            name: u.name || '',
-            code: u.code || '',
-            unitType: u.unit_type || u.unitType || '',
-            floor: u.floor || null,
-            areaSqm: u.area_sqm || u.areaSqm || null,
-            status: u.status || 'NOT_STARTED',
-            completionPct: u.completion_pct || u.completionPct || 0,
-            boqItems: Array.isArray(u.boq_items) ? u.boq_items.map((b: any) => ({
-              id: String(b.id),
-              orgId: String(b.org_id || b.orgId || ''),
-              unitId: String(b.unit_id || b.unitId || ''),
-              trade: b.trade || '',
-              description: b.description || '',
-              quantity: b.quantity || 0,
-              unitOfMeasure: b.unit_of_measure || b.unitOfMeasure || 'unit',
-              completionPct: b.completion_pct || b.completionPct || 0,
-            })) : (Array.isArray(u.boqItems) ? u.boqItems : [])
-          })) : [],
-          assignments: Array.isArray(p.assignments) ? p.assignments : []
-        }));
-        
-        return { data: mappedItems, fromCache: false }
-      }
-    } catch (err) {
-      console.warn('Online fetch failed, falling back to cache:', err)
-    }
-  }
-  const localData = await getLocalProjects()
-  return { data: localData, fromCache: true }
-}
+export async function getLocalProjects(): Promise<any[]> { const projects = await db.projects.toArray(); const result: any[] = []; for (const project of projects) { const units = await db.units.where('projectId').equals(project.id).toArray(); const unitsWithBoq: any[] = []; for (const unit of units) unitsWithBoq.push({ ...unit, boqItems: await db.boqItems.where('unitId').equals(unit.id).toArray() }); result.push({ ...project, units: unitsWithBoq }) } return result }
+export async function getLocalRemarks(): Promise<any[]> { return (await db.remarks.toArray()).map(r => ({ ...r, photos: typeof r.photos === 'string' ? JSON.parse(r.photos) : r.photos, gpsTag: r.gpsTag ? (typeof r.gpsTag === 'string' ? JSON.parse(r.gpsTag) : r.gpsTag) : null, unit: { id: r.unitId, name: '', code: '' } })) }
+export async function getLocalUsers(): Promise<any[]> { return (await db.users.toArray()).map(u => ({ ...u, assignments: typeof u.assignments === 'string' ? JSON.parse(u.assignments) : u.assignments })) }
+export async function getLocalAuditLogs(): Promise<any[]> { return (await db.auditLogs.toArray()).map(l => ({ ...l, details: typeof l.details === 'string' ? JSON.parse(l.details) : l.details })) }
+export async function getLocalDictionaries(): Promise<any[]> { return (await db.dictionaries.toArray()).map(d => ({ ...d, items: typeof d.items === 'string' ? JSON.parse(d.items) : d.items })) }
 
-export async function getRemarksHybrid(orgId: string): Promise<{
-  data: any[]; fromCache: boolean
-}> {
-  if (onlineStatus) {
-    try {
-      const res = await apiRequest<any>(`/quality/remarks`)
-      if (res.success && res.data) {
-        let items = res.data.items || res.data;
-        if (!Array.isArray(items)) items = [];
-        
-        // SAFE MAPPING
-        const mappedItems = items.map((r: any) => ({
-          id: String(r.id),
-          orgId: String(r.org_id || r.orgId || ''),
-          unitId: String(r.unit_id || r.unitId || ''),
-          unit: r.unit || { id: String(r.unit_id || ''), name: 'وحدة غير معروفة', code: 'N/A' },
-          workOrderId: r.work_order_id ? String(r.work_order_id) : (r.workOrderId ? String(r.workOrderId) : null),
-          templateId: r.template_id ? String(r.template_id) : (r.templateId ? String(r.templateId) : null),
-          customIssue: r.custom_issue || r.customIssue || null,
-          severity: r.severity || 'MINOR',
-          status: r.status || 'OPEN',
-          photos: Array.isArray(r.photos) ? r.photos : [],
-          gpsTag: r.gps_tag || r.gpsTag || null,
-          resolutionNotes: r.resolution_notes || r.resolutionNotes || null,
-          createdBy: r.created_by ? String(r.created_by) : (r.createdBy ? String(r.createdBy) : null),
-          resolvedAt: r.resolved_at || r.resolvedAt || null,
-          createdAt: r.created_at || r.createdAt || new Date().toISOString(),
-          updatedAt: r.updated_at || r.updatedAt || new Date().toISOString(),
-        }));
-        
-        return { data: mappedItems, fromCache: false }
-      }
-    } catch (err) {
-      console.warn('Online fetch failed, falling back to cache:', err)
-    }
-  }
-  const localData = await getLocalRemarks()
-  return { data: localData, fromCache: true }
-}
-
-export async function getUsersHybrid(orgId: string): Promise<{
-  data: any[]; fromCache: boolean
-}> {
-  if (onlineStatus) {
-    try {
-      const res = await apiRequest<any>(`/auth/users`)
-      if (res.success && res.data) {
-        let items = Array.isArray(res.data) ? res.data : res.data.users || res.data.items || [];
-        
-        // SAFE MAPPING
-        const mappedItems = items.map((u: any) => ({
-          id: String(u.id),
-          orgId: String(u.org_id || u.orgId || ''),
-          email: u.email || '',
-          name: u.name || '',
-          isActive: u.is_active ?? u.isActive ?? true,
-          assignments: Array.isArray(u.assignments) ? u.assignments.map((a: any) => ({
-            id: String(a.id),
-            projectId: String(a.project_id || a.projectId || ''),
-            project: a.project || { id: String(a.project_id || ''), name: '', code: '' },
-            role: a.role || { id: String(a.role_id || ''), name: '' }
-          })) : []
-        }));
-        
-        return { data: mappedItems, fromCache: false }
-      }
-    } catch (err) {
-      console.warn('Online fetch failed, falling back to cache:', err)
-    }
-  }
-  const localData = await getLocalUsers()
-  return { data: localData, fromCache: true }
-}
-
-export async function getAuditLogsHybrid(orgId: string): Promise<{
-  data: any[]; fromCache: boolean
-}> {
-  if (onlineStatus) {
-    try {
-      const res = await apiRequest<any>(`/auth/audit?page_size=100`)
-      if (res.success && res.data) {
-        let items = res.data.items || res.data;
-        if (!Array.isArray(items)) items = [];
-        
-        // SAFE MAPPING
-        const mappedItems = items.map((l: any) => ({
-          id: String(l.id),
-          user: l.user || null,
-          action: l.action || '',
-          resourceType: l.resource_type || l.resourceType || '',
-          resourceId: l.resource_id ? String(l.resource_id) : (l.resourceId ? String(l.resourceId) : null),
-          details: l.details_json || l.details || {},
-          createdAt: l.created_at || l.createdAt || new Date().toISOString(),
-        }));
-        
-        return { data: mappedItems, fromCache: false }
-      }
-    } catch (err) {
-      console.warn('Online fetch failed, falling back to cache:', err)
-    }
-  }
-  const localData = await getLocalAuditLogs()
-  return { data: localData, fromCache: true }
-}
-
-export async function getDictionariesHybrid(orgId: string): Promise<{
-  data: any[]; fromCache: boolean
-}> {
-  if (onlineStatus) {
-    try {
-      const res = await apiRequest<any>(`/projects/dictionaries?org_id=${orgId}`)
-      if (res.success && res.data) {
-        let items = res.data.dictionaries || res.data.items || res.data;
-        if (!Array.isArray(items)) items = [];
-        
-        // SAFE MAPPING
-        const mappedItems = items.map((d: any) => ({
-          id: String(d.id),
-          orgId: String(d.org_id || d.orgId || ''),
-          name: d.name || '',
-          category: d.category || '',
-          description: d.description || null,
-          isActive: d.is_active ?? d.isActive ?? true,
-          createdBy: d.created_by ? String(d.created_by) : (d.createdBy ? String(d.createdBy) : null),
-          items: Array.isArray(d.items) ? d.items.map((i: any) => ({
-            id: String(i.id),
-            dictionaryId: String(i.dictionary_id || i.dictionaryId || ''),
-            trade: i.trade || '',
-            description: i.description || '',
-            quantity: i.quantity || 0,
-            unitOfMeasure: i.unit_of_measure || i.unitOfMeasure || 'unit',
-            sortOrder: i.sort_order || i.sortOrder || 0,
-          })) : []
-        }));
-        
-        return { data: mappedItems, fromCache: false }
-      } else {
-        return { data: [], fromCache: false }
-      }
-    } catch (err) {
-      console.warn('Online fetch failed, falling back to cache:', err)
-    }
-  }
-  const localData = await getLocalDictionaries()
-  return { data: localData, fromCache: true }
-}
-
-// ============================================================
-// Local Data Accessors (IndexedDB)
-// ============================================================
-
-export async function getLocalProjects(): Promise<any[]> {
-  const projects = await db.projects.toArray()
-  const result = []
-  for (const project of projects) {
-    const units = await db.units.where('projectId').equals(project.id).toArray()
-    const unitsWithBoq = []
-    for (const unit of units) {
-      const boqItems = await db.boqItems.where('unitId').equals(unit.id).toArray()
-      unitsWithBoq.push({ ...unit, boqItems })
-    }
-    result.push({ ...project, units: unitsWithBoq, assignments: [] })
-  }
-  return result
-}
-
-export async function getLocalRemarks(): Promise<any[]> {
-  const remarks = await db.remarks.toArray()
-  return remarks.map(r => ({
-    ...r,
-    photos: typeof r.photos === 'string' ? JSON.parse(r.photos) : r.photos,
-    gpsTag: r.gpsTag ? (typeof r.gpsTag === 'string' ? JSON.parse(r.gpsTag) : r.gpsTag) : null,
-    unit: { id: r.unitId, name: 'وحدة محلية', code: 'N/A' },
-  }))
-}
-
-export async function getLocalUsers(): Promise<any[]> {
-  const users = await db.users.toArray()
-  return users.map(u => ({
-    ...u,
-    assignments: typeof u.assignments === 'string' ? JSON.parse(u.assignments) : u.assignments,
-  }))
-}
-
-export async function getLocalAuditLogs(): Promise<any[]> {
-  const logs = await db.auditLogs.toArray()
-  return logs.map(l => ({
-    ...l,
-    details: typeof l.details === 'string' ? JSON.parse(l.details) : l.details,
-  }))
-}
-
-export async function getLocalDictionaries(): Promise<any[]> {
-  const dicts = await db.dictionaries.toArray()
-  return dicts.map(d => ({
-    ...d,
-    items: typeof d.items === 'string' ? JSON.parse(d.items) : d.items,
-  }))
-}
-
-// ============================================================
-// Upload Photos to FastAPI S3 endpoint
-// ============================================================
-
-export async function uploadPhotosToServer(
-  remarkId: string,
-  files: File[]
-): Promise<{ uploaded: number; urls: string[] }> {
-  const result = await uploadFile(
-    `/quality/remarks/${remarkId}/photos`,
-    files
-  )
-  if (result.success && result.data) {
-    return result.data
-  }
-  throw new Error(result.error || 'Upload failed')
-}
-
-// ============================================================
-// Helpers
-// ============================================================
-
-function _mapEntityType(localType: string): string {
-  const map: Record<string, string> = {
-    'project': 'WORK_ORDER',
-    'unit': 'UNIT_PROGRESS',
-    'boqProgress': 'UNIT_PROGRESS',
-    'remark': 'REMARK',
-    'photo': 'REMARK',
-    'user': 'WORK_ORDER',
-    'dictionary': 'WORK_ORDER',
-  }
-  return map[localType] || 'WORK_ORDER'
-}
-
-function _extractEntityId(payload: any, item: { entityType: string; operationUuid: string }): string {
-  if (payload.unitId) return payload.unitId
-  if (payload.entity_id) return payload.entity_id
-  if (payload.id) return payload.id
-  return item.operationUuid
-}
+export async function uploadPhotosToServer(remarkId: string, files: File[]): Promise<{ uploaded: number; urls: string[] }> { const r = await uploadFile(`/quality/remarks/${remarkId}/photos`, files); if (r.success && r.data) return r.data; throw new Error(r.error || 'Upload failed') }
+function _mapEntityType(localType: string): string { const map: Record<string, string> = { project: 'WORK_ORDER', unit: 'UNIT_PROGRESS', boqProgress: 'UNIT_PROGRESS', remark: 'REMARK', photo: 'REMARK', user: 'WORK_ORDER', dictionary: 'WORK_ORDER' }; return map[localType] || 'WORK_ORDER' }
+function _extractEntityId(payload: any, item: { entityType: string; operationUuid: string }): string { return payload.unitId || payload.entity_id || payload.id || item.operationUuid }
