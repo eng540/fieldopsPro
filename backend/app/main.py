@@ -31,17 +31,28 @@ async def lifespan(app: FastAPI):
     await engine.dispose()
 
 
-app = FastAPI(title=settings.APP_NAME, version=settings.VERSION, lifespan=lifespan,
-              docs_url="/docs" if settings.DEBUG else None,
-              redoc_url="/redoc" if settings.DEBUG else None)
+app = FastAPI(
+    title=settings.APP_NAME,
+    version=settings.VERSION,
+    lifespan=lifespan,
+    docs_url="/docs" if settings.DEBUG else None,
+    redoc_url="/redoc" if settings.DEBUG else None,
+)
 
 cors_origins = settings.CORS_ORIGINS
 if settings.DEBUG and not cors_origins:
     cors_origins = ["http://localhost:3000", "http://localhost:5173"]
 
-app.add_middleware(CORSMiddleware, allow_origins=cors_origins,
-    allow_origin_regex=r"https://.*\.up\.railway\.app", allow_credentials=True,
-    allow_methods=["*"], allow_headers=["*"], expose_headers=["X-Request-ID"], max_age=600)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origins,
+    allow_origin_regex=r"https://.*\.up\.railway\.app",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["X-Request-ID"],
+    max_age=600,
+)
 
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(iam_router, prefix="/auth", tags=["Authentication & IAM"])
