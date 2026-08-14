@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 
 class FieldDiaryCreate(BaseModel):
@@ -18,7 +18,7 @@ class FieldDiaryCreate(BaseModel):
 
     @field_validator("visits_accepted")
     @classmethod
-    def accepted_cannot_exceed_total(cls, value: int, info):
+    def accepted_cannot_exceed_total(cls, value: int, info: ValidationInfo) -> int:
         total = info.data.get("visits_total")
         if total is not None and value > total:
             raise ValueError("visits_accepted cannot exceed visits_total")
