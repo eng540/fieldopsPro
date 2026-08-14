@@ -1,7 +1,11 @@
 // FieldOps V4 — Service Worker
-// Deployment-safe offline support: never pin a previous Next.js build.
+// Deployment-safe offline support.
+// IMPORTANT: Next.js HTML/chunks are never cached. This prevents an old
+// deployment from being combined with a new deployment and causing
+// ChunkLoadError / "This page couldn't load" failures after release.
 
-const CACHE_NAME = 'fieldops-v4-v2'
+const CACHE_NAME = 'fieldops-v4-runtime-v3'
+const LEGACY_CACHE_PREFIX = 'fieldops-v4-'
 const STATIC_ASSETS = ['/logo.svg']
 
 self.addEventListener('install', (event) => {
@@ -16,12 +20,11 @@ self.addEventListener('activate', (event) => {
     caches.keys().then((cacheNames) =>
       Promise.all(
         cacheNames
-          .filter((name) => name !== CACHE_NAME)
+          .filter((name) => name.startsWith(LEGACY_CACHE_PREFIX) && name !== CACHE_NAME)
           .map((name) => caches.delete(name))
       )
-    )
+    ).then(() => self.clients.claim())
   )
-  self.clients.claim()
 })
 
 self.addEventListener('fetch', (event) => {
@@ -29,81 +32,57 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(request.url)
 
   if (request.method !== 'GET') return
+  if (url.origin !== self.location.origin) return
 
-  // The service-worker script itself must always be fetched from the network so
-  // an older worker cannot pin itself forever.
+  // Never cache the service worker itself.
   if (url.pathname === '/sw.js') return
 
-  // Next.js build assets are immutable and build-specific. Serving an old
-  // chunk after a deployment can produce the production "page couldn't load"
-  // / ChunkLoadError failure. Always prefer the network and only fall back to
-  // a cached asset when the network is unavailable.
-  if (url.pathname.startsWith('/_next/static/')) {
-    event.respondWith(
-      fetch(request)
-        .then((response) => response)
-        .catch(() => caches.match(request))
-    )
+  // Never cache Next.js HTML or build-specific chunks. A deployment may change
+  // these URLs atomically, and serving a stale document/chunk pair is unsafe.
+  if (url.pathname.startsWith('/_next/')) {
+    event.respondWith(fetch(request))
     return
   }
 
-  // API calls — network-first, cache only successful GET responses.
+  // API GETs: network-first with a runtime fallback for offline use.
   if (url.pathname.startsWith('/api/')) {
     event.respondWith(
       fetch(request)
         .then((response) => {
           if (response.ok) {
-            const responseClone = response.clone()
-            caches.open(CACHE_NAME).then((cache) => cache.put(request, responseClone))
+            const clone = response.clone()
+            caches.open(CACHE_NAME).then((cache) => cache.put(request, clone)).catch(() => undefined)
           }
           return response
         })
         .catch(() =>
-          caches.match(request).then((cachedResponse) =>
-            cachedResponse || new Response(
-              JSON.stringify({ error: 'OFFLINE', message: 'No cached data available' }),
-              { status: 503, headers: { 'Content-Type': 'application/json' } }
-            )
-          )
+          caches.match(request).then((cached) => cached || new Response(
+            JSON.stringify({ error: 'OFFLINE', message: 'No cached data available' }),
+            { status: 503, headers: { 'Content-Type': 'application/json' } }
+          ))
         )
     )
     return
   }
 
-  // Application navigation — always prefer the current deployment. A cached
-  // HTML shell is used only when the network is unavailable.
+  // Do not cache navigations. Always load the current deployment HTML.
   if (request.mode === 'navigate') {
-    event.respondWith(
-      fetch(request)
-        .then((response) => {
-          if (response.ok) {
-            const responseClone = response.clone()
-            caches.open(CACHE_NAME).then((cache) => cache.put(request, responseClone))
-          }
-          return response
-        })
-        .catch(() => caches.match(request).then((cached) => cached || caches.match('/')))
-    )
+    event.respondWith(fetch(request))
     return
   }
 
-  // Small non-Next static assets — stale-while-revalidate is safe here.
-  if (
-    url.pathname.endsWith('.svg') ||
-    url.pathname.endsWith('.png') ||
-    url.pathname.endsWith('.ico') ||
-    url.pathname.endsWith('.woff2')
-  ) {
+  // Only small, deployment-independent assets use the cache.
+  if (url.pathname.endsWith('.svg') || url.pathname.endsWith('.png') || url.pathname.endsWith('.ico') || url.pathname.endsWith('.woff2')) {
     event.respondWith(
-      caches.match(request).then((cachedResponse) => {
+      caches.match(request).then((cached) => {
         const network = fetch(request).then((response) => {
           if (response.ok) {
-            const responseClone = response.clone()
-            caches.open(CACHE_NAME).then((cache) => cache.put(request, responseClone))
+            const clone = response.clone()
+            caches.open(CACHE_NAME).then((cache) => cache.put(request, clone)).catch(() => undefined)
           }
           return response
-        }).catch(() => cachedResponse)
-        return cachedResponse || network
+        }).catch(() => cached)
+        return cached || network
       })
     )
   }
@@ -122,15 +101,13 @@ self.addEventListener('sync', (event) => {
 self.addEventListener('push', (event) => {
   if (!event.data) return
   const data = event.data.json()
-  const title = data.title || 'FieldOps V4'
-  const options = {
+  event.waitUntil(self.registration.showNotification(data.title || 'FieldOps V4', {
     body: data.body || 'إشعار جديد من المنصة',
     icon: '/logo.svg',
     badge: '/logo.svg',
     dir: 'rtl',
     lang: 'ar',
-  }
-  event.waitUntil(self.registration.showNotification(title, options))
+  }))
 })
 
 self.addEventListener('message', (event) => {
