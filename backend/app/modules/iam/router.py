@@ -174,7 +174,7 @@ async def login(
         secure=False,  # False for development/testing
         samesite="lax",
         max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
-        path="/auth/refresh",
+        path="/api/v1/auth/refresh",
     )
 
     return {
@@ -299,12 +299,13 @@ async def refresh_access_token(
         secure=False,
         samesite="lax",
         max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
-        path="/auth/refresh",
+        path="/api/v1/auth/refresh",
     )
 
     return {
         "access_token": access_token_str,
         "expires_in": settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        "refresh_token": new_refresh_token_str,
     }
 
 
@@ -357,7 +358,7 @@ async def logout(
         )
 
     # Clear refresh cookie
-    response.delete_cookie(key="refresh_token", path="/auth/refresh")
+    response.delete_cookie(key="refresh_token", path="/api/v1/auth/refresh")
 
     return {"detail": "Logged out successfully"}
 
