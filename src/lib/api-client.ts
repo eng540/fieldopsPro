@@ -10,6 +10,39 @@ export interface SyncStatus { isOnline: boolean; isSyncing: boolean; pendingCoun
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'
 function getAccessToken(): string | null { return useAuthStore.getState().tokens?.accessToken || null }
 
+/**
+ * Backend responses use the Python/FastAPI snake_case contract while the
+ * browser UI uses camelCase models. Normalize read-only API payloads at the
+ * transport boundary so individual screens do not each implement their own
+ * mapping (and, importantly, so nested units/BOQ/assignments are consistent).
+ */
+function snakeToCamelKey(key: string): string {
+  return key.replace(/_([a-zA-Z0-9])/g, (_, char: string) => char.toUpperCase())
+}
+
+function normalizeApiData<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map(item => normalizeApiData(item)) as T
+  }
+  if (value && typeof value === 'object' && !(value instanceof Date)) {
+    const source = value as Record<string, unknown>
+    const result: Record<string, unknown> = {}
+    for (const [key, item] of Object.entries(source)) {
+      result[snakeToCamelKey(key)] = normalizeApiData(item)
+    }
+    return result as T
+  }
+  return value
+}
+
+async function normalizedHybrid<T>(request: Promise<ApiResponse<T>>): Promise<ApiResponse<T>> {
+  const response = await request
+  if (response.success && response.data !== undefined) {
+    return { ...response, data: normalizeApiData(response.data) }
+  }
+  return response
+}
+
 let onlineStatus = typeof window !== 'undefined' ? navigator.onLine : true
 const onlineListeners: Set<(online: boolean) => void> = new Set()
 if (typeof window !== 'undefined') {
@@ -128,11 +161,35 @@ export async function fullDataSync(orgId: string): Promise<{ success: boolean; s
   finally { isSyncing = false; notifySyncListeners(await getPendingSyncCount()) }
 }
 
-export async function getProjectsHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> { const r = await apiRequest<any>(`/projects?org_id=${encodeURIComponent(orgId)}`); if (r.success && r.data) return { data: r.data.projects || r.data.items || r.data, fromCache: false }; return { data: await getLocalProjects(), fromCache: true } }
-export async function getRemarksHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> { const r = await apiRequest<any>('/quality/remarks'); if (r.success && r.data) return { data: r.data.items || r.data, fromCache: false }; return { data: await getLocalRemarks(), fromCache: true } }
-export async function getUsersHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> { const r = await apiRequest<any>('/auth/users'); if (r.success && r.data) return { data: Array.isArray(r.data) ? r.data : r.data.users || r.data.items || [], fromCache: false }; return { data: await getLocalUsers(), fromCache: true } }
-export async function getAuditLogsHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> { const r = await apiRequest<any>('/auth/audit?page_size=100'); if (r.success && r.data) return { data: r.data.items || r.data, fromCache: false }; return { data: await getLocalAuditLogs(), fromCache: true } }
-export async function getDictionariesHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> { const r = await apiRequest<any>(`/projects/dictionaries?org_id=${encodeURIComponent(orgId)}`); if (r.success && r.data) return { data: r.data.dictionaries || r.data.items || r.data, fromCache: false }; return { data: await getLocalDictionaries(), fromCache: true } }
+export async function getProjectsHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> {
+  const r = await normalizedHybrid(apiRequest<any>(`/projects?org_id=${encodeURIComponent(orgId)}`))
+  if (r.success && r.data) return { data: r.data.projects || r.data.items || r.data, fromCache: false }
+  return { data: await getLocalProjects(), fromCache: true }
+}
+
+export async function getRemarksHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> {
+  const r = await normalizedHybrid(apiRequest<any>('/quality/remarks'))
+  if (r.success && r.data) return { data: r.data.items || r.data, fromCache: false }
+  return { data: await getLocalRemarks(), fromCache: true }
+}
+
+export async function getUsersHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> {
+  const r = await normalizedHybrid(apiRequest<any>('/auth/users'))
+  if (r.success && r.data) return { data: Array.isArray(r.data) ? r.data : r.data.users || r.data.items || [], fromCache: false }
+  return { data: await getLocalUsers(), fromCache: true }
+}
+
+export async function getAuditLogsHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> {
+  const r = await normalizedHybrid(apiRequest<any>('/auth/audit?page_size=100'))
+  if (r.success && r.data) return { data: r.data.items || r.data, fromCache: false }
+  return { data: await getLocalAuditLogs(), fromCache: true }
+}
+
+export async function getDictionariesHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> {
+  const r = await normalizedHybrid(apiRequest<any>(`/projects/dictionaries?org_id=${encodeURIComponent(orgId)}`))
+  if (r.success && r.data) return { data: r.data.dictionaries || r.data.items || r.data, fromCache: false }
+  return { data: await getLocalDictionaries(), fromCache: true }
+}
 
 export async function getLocalProjects(): Promise<any[]> { const projects = await db.projects.toArray(); const result: any[] = []; for (const project of projects) { const units = await db.units.where('projectId').equals(project.id).toArray(); const unitsWithBoq: any[] = []; for (const unit of units) unitsWithBoq.push({ ...unit, boqItems: await db.boqItems.where('unitId').equals(unit.id).toArray() }); result.push({ ...project, units: unitsWithBoq }) } return result }
 export async function getLocalRemarks(): Promise<any[]> { return (await db.remarks.toArray()).map(r => ({ ...r, photos: typeof r.photos === 'string' ? JSON.parse(r.photos) : r.photos, gpsTag: r.gpsTag ? (typeof r.gpsTag === 'string' ? JSON.parse(r.gpsTag) : r.gpsTag) : null, unit: { id: r.unitId, name: '', code: '' } })) }
