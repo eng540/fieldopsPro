@@ -14,6 +14,7 @@ from app.modules.execution.models import (
     EventType,
     MetricType,
     MONOTONIC_STATUS_TRANSITIONS,
+    ExecutionEvent,
     UnitBoQProgress,
     UnitBoQProgressStatus,
     WorkOrder,
@@ -167,9 +168,57 @@ async def submit_events(request: EventBatchRequest, db: AsyncSession = Depends(g
             conflicts.append(exc.conflict_details)
         except BusinessRuleError as exc:
             failed.append({"sync_uuid": intent.sync_uuid, "error": str(exc)})
-        except Exception as exc:
+        except Exception:
             failed.append({"sync_uuid": intent.sync_uuid, "error": "Event processing failed"})
     return EventBatchResponse(succeeded=succeeded, conflicts=conflicts, failed=failed)
+
+
+@router.get("/events/history")
+async def execution_event_history(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    event_type: str | None = Query(None),
+    unit_id: int | None = Query(None),
+    boq_item_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """Tenant-scoped, read-only execution timeline for the Operations Center."""
+    org_id = current_user["org_id"]
+    base = select(ExecutionEvent).where(ExecutionEvent.org_id == org_id)
+    count = select(func.count()).select_from(ExecutionEvent).where(ExecutionEvent.org_id == org_id)
+    if event_type:
+        base = base.where(ExecutionEvent.event_type == event_type)
+        count = count.where(ExecutionEvent.event_type == event_type)
+    if unit_id is not None:
+        base = base.where(ExecutionEvent.unit_id == unit_id)
+        count = count.where(ExecutionEvent.unit_id == unit_id)
+    if boq_item_id is not None:
+        base = base.where(ExecutionEvent.entity_type == EntityType.BOQ_ITEM.value, ExecutionEvent.entity_id == str(boq_item_id))
+        count = count.where(ExecutionEvent.entity_type == EntityType.BOQ_ITEM.value, ExecutionEvent.entity_id == str(boq_item_id))
+    total = (await db.execute(count)).scalar_one()
+    offset = (page - 1) * page_size
+    rows = (await db.execute(base.order_by(ExecutionEvent.occurred_at.desc(), ExecutionEvent.recorded_at.desc()).offset(offset).limit(page_size))).scalars().all()
+    items = [{
+        "event_id": row.id,
+        "sync_uuid": row.sync_uuid,
+        "entity_type": row.entity_type.value if hasattr(row.entity_type, "value") else row.entity_type,
+        "entity_id": row.entity_id,
+        "event_class": row.event_class.value if hasattr(row.event_class, "value") else row.event_class,
+        "event_type": row.event_type.value if hasattr(row.event_type, "value") else row.event_type,
+        "metric_type": row.metric_type.value if hasattr(row.metric_type, "value") else row.metric_type,
+        "previous_value": row.previous_value,
+        "new_value": row.new_value,
+        "delta_value": row.delta_value,
+        "unit_of_measure": row.unit_of_measure,
+        "occurred_at": row.occurred_at,
+        "recorded_at": row.recorded_at,
+        "user_id": row.user_id,
+        "reason": row.reason,
+        "notes": row.notes,
+        "transaction_group_id": row.transaction_group_id,
+    } for row in rows]
+    return {"items": items, "total": total, "page": page, "page_size": page_size, "has_more": offset + len(items) < total}
 
 
 async def _legacy_event(data, db: AsyncSession, current_user: dict, group_id: str | None = None):
