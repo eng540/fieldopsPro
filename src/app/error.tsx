@@ -10,12 +10,15 @@ export default function GlobalError({
   reset: () => void
 }) {
   useEffect(() => {
-    console.error('[FieldOps UI Error]', error)
+    // Log only non-sensitive diagnostics. Never serialize auth state or tokens.
+    console.error('[FieldOps UI Error]', {
+      name: error?.name,
+      message: error?.message,
+      digest: error?.digest,
+    })
   }, [error])
 
   const reload = () => {
-    // A hard navigation is useful for stale Next.js chunks while preserving
-    // the authenticated session when it is still valid.
     window.location.reload()
   }
 
