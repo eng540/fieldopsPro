@@ -10,26 +10,17 @@ export interface SyncStatus { isOnline: boolean; isSyncing: boolean; pendingCoun
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'
 function getAccessToken(): string | null { return useAuthStore.getState().tokens?.accessToken || null }
 
-/**
- * Backend responses use the Python/FastAPI snake_case contract while the
- * browser UI uses camelCase models. Normalize read-only API payloads at the
- * transport boundary so individual screens do not each implement their own
- * mapping (and, importantly, so nested units/BOQ/assignments are consistent).
- */
+/** Normalize FastAPI snake_case read payloads to the camelCase UI contract. */
 function snakeToCamelKey(key: string): string {
   return key.replace(/_([a-zA-Z0-9])/g, (_, char: string) => char.toUpperCase())
 }
 
 function normalizeApiData<T>(value: T): T {
-  if (Array.isArray(value)) {
-    return value.map(item => normalizeApiData(item)) as T
-  }
+  if (Array.isArray(value)) return value.map(item => normalizeApiData(item)) as T
   if (value && typeof value === 'object' && !(value instanceof Date)) {
     const source = value as Record<string, unknown>
     const result: Record<string, unknown> = {}
-    for (const [key, item] of Object.entries(source)) {
-      result[snakeToCamelKey(key)] = normalizeApiData(item)
-    }
+    for (const [key, item] of Object.entries(source)) result[snakeToCamelKey(key)] = normalizeApiData(item)
     return result as T
   }
   return value
@@ -37,9 +28,7 @@ function normalizeApiData<T>(value: T): T {
 
 async function normalizedHybrid<T>(request: Promise<ApiResponse<T>>): Promise<ApiResponse<T>> {
   const response = await request
-  if (response.success && response.data !== undefined) {
-    return { ...response, data: normalizeApiData(response.data) }
-  }
+  if (response.success && response.data !== undefined) return { ...response, data: normalizeApiData(response.data) }
   return response
 }
 
@@ -57,11 +46,7 @@ async function requestOnce(endpoint: string, options: RequestInit = {}): Promise
   return fetch(`${API_BASE}${endpoint}`, {
     ...options,
     credentials: 'include',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...options.headers,
-    },
+    headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...options.headers },
   })
 }
 
@@ -70,20 +55,11 @@ async function apiRequest<T>(endpoint: string, options: RequestInit = {}, fallba
   try {
     let res = await requestOnce(endpoint, options)
     if (res.status === 401) {
-      // Exactly one refresh attempt. The auth store serializes concurrent refreshes,
-      // preventing a burst of expired requests from creating a refresh storm.
-      try {
-        await useAuthStore.getState().refreshAccessToken()
-        res = await requestOnce(endpoint, options)
-      } catch {
-        return { success: false, error: 'UNAUTHORIZED' }
-      }
+      try { await useAuthStore.getState().refreshAccessToken(); res = await requestOnce(endpoint, options) }
+      catch { return { success: false, error: 'UNAUTHORIZED' } }
       if (res.status === 401) return { success: false, error: 'UNAUTHORIZED' }
     }
-    if (!res.ok) {
-      const errorData = await res.json().catch(() => ({}))
-      return { success: false, error: errorData.detail || errorData.error || `HTTP ${res.status}` }
-    }
+    if (!res.ok) { const errorData = await res.json().catch(() => ({})); return { success: false, error: errorData.detail || errorData.error || `HTTP ${res.status}` } }
     return { success: true, data: await res.json() }
   } catch (error) {
     if (!onlineStatus && fallbackToCache) return { success: false, error: 'OFFLINE', fromCache: false }
@@ -96,16 +72,10 @@ async function uploadFile(endpoint: string, files: File[], extraFields?: Record<
   const formData = new FormData()
   for (const file of files) formData.append('files', file)
   if (extraFields) for (const [key, value] of Object.entries(extraFields)) formData.append(key, value)
-  const send = () => fetch(`${API_BASE}${endpoint}`, {
-    method: 'POST', credentials: 'include',
-    headers: { ...(getAccessToken() ? { Authorization: `Bearer ${getAccessToken()}` } : {}) }, body: formData,
-  })
+  const send = () => fetch(`${API_BASE}${endpoint}`, { method: 'POST', credentials: 'include', headers: { ...(getAccessToken() ? { Authorization: `Bearer ${getAccessToken()}` } : {}) }, body: formData })
   try {
     let res = await send()
-    if (res.status === 401) {
-      await useAuthStore.getState().refreshAccessToken()
-      res = await send()
-    }
+    if (res.status === 401) { await useAuthStore.getState().refreshAccessToken(); res = await send() }
     if (!res.ok) { const e = await res.json().catch(() => ({})); return { success: false, error: e.detail || `HTTP ${res.status}` } }
     return { success: true, data: await res.json() }
   } catch (error) { return { success: false, error: String(error) } }
@@ -163,31 +133,50 @@ export async function fullDataSync(orgId: string): Promise<{ success: boolean; s
 
 export async function getProjectsHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> {
   const r = await normalizedHybrid(apiRequest<any>(`/projects?org_id=${encodeURIComponent(orgId)}`))
-  if (r.success && r.data) return { data: r.data.projects || r.data.items || r.data, fromCache: false }
+  if (r.success && r.data) {
+    const raw = r.data.projects || r.data.items || r.data
+    const data = (Array.isArray(raw) ? raw : []).map((project: any) => ({
+      ...project,
+      id: String(project.id),
+      orgId: String(project.orgId ?? project.org_id ?? ''),
+      totalUnits: Number(project.totalUnits ?? project.total_units ?? 0),
+      completionPct: Number(project.completionPct ?? project.completion_pct ?? 0),
+      isActive: project.isActive !== false,
+      units: (Array.isArray(project.units) ? project.units : []).map((unit: any) => ({
+        ...unit,
+        id: String(unit.id),
+        projectId: String(unit.projectId ?? unit.project_id ?? project.id),
+        completionPct: Number(unit.completionPct ?? unit.completion_pct ?? 0),
+        boqItems: Array.isArray(unit.boqItems) ? unit.boqItems : [],
+      })),
+      assignments: Array.isArray(project.assignments) ? project.assignments : [],
+    }))
+    return { data, fromCache: false }
+  }
   return { data: await getLocalProjects(), fromCache: true }
 }
 
 export async function getRemarksHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> {
   const r = await normalizedHybrid(apiRequest<any>('/quality/remarks'))
-  if (r.success && r.data) return { data: r.data.items || r.data, fromCache: false }
+  if (r.success && r.data) return { data: Array.isArray(r.data.items) ? r.data.items : Array.isArray(r.data) ? r.data : [], fromCache: false }
   return { data: await getLocalRemarks(), fromCache: true }
 }
 
 export async function getUsersHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> {
   const r = await normalizedHybrid(apiRequest<any>('/auth/users'))
-  if (r.success && r.data) return { data: Array.isArray(r.data) ? r.data : r.data.users || r.data.items || [], fromCache: false }
+  if (r.success && r.data) return { data: Array.isArray(r.data) ? r.data : Array.isArray(r.data.users) ? r.data.users : Array.isArray(r.data.items) ? r.data.items : [], fromCache: false }
   return { data: await getLocalUsers(), fromCache: true }
 }
 
 export async function getAuditLogsHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> {
   const r = await normalizedHybrid(apiRequest<any>('/auth/audit?page_size=100'))
-  if (r.success && r.data) return { data: r.data.items || r.data, fromCache: false }
+  if (r.success && r.data) return { data: Array.isArray(r.data.items) ? r.data.items : Array.isArray(r.data) ? r.data : [], fromCache: false }
   return { data: await getLocalAuditLogs(), fromCache: true }
 }
 
 export async function getDictionariesHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> {
   const r = await normalizedHybrid(apiRequest<any>(`/projects/dictionaries?org_id=${encodeURIComponent(orgId)}`))
-  if (r.success && r.data) return { data: r.data.dictionaries || r.data.items || r.data, fromCache: false }
+  if (r.success && r.data) return { data: Array.isArray(r.data.dictionaries) ? r.data.dictionaries : Array.isArray(r.data.items) ? r.data.items : Array.isArray(r.data) ? r.data : [], fromCache: false }
   return { data: await getLocalDictionaries(), fromCache: true }
 }
 
