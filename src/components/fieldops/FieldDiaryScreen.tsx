@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { CalendarDays, MapPin, Save, WifiOff, RefreshCw, Trash2, Cloud, Users, Wrench, ClipboardCheck } from 'lucide-react'
+import { CalendarDays, MapPin, Save, WifiOff, RefreshCw, Trash2, Users, Wrench, ClipboardCheck, RotateCcw, CloudOff } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
@@ -10,30 +10,218 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { useToast } from '@/hooks/use-toast'
 import { listDiary, saveDiary, type DiaryEntry } from '@/lib/legacy-capabilities-api'
 
-const DRAFT_PREFIX='fieldops-diary-draft:'
+const DRAFT_PREFIX = 'fieldops-diary-draft:'
+const DRAFT_META_PREFIX = 'fieldops-diary-meta:'
 
-type FormState={diary_date:string;weather:string;workers:string;equipment:string;visits_total:string;visits_accepted:string;observations:string;gps_tag:Record<string,unknown>|null}
-const initialForm=():FormState=>({diary_date:new Date().toISOString().slice(0,10),weather:'',workers:'',equipment:'',visits_total:'0',visits_accepted:'0',observations:'',gps_tag:null})
+type FormState = {
+  diary_date: string
+  weather: string
+  workers: string
+  equipment: string
+  visits_total: string
+  visits_accepted: string
+  observations: string
+  gps_tag: Record<string, unknown> | null
+}
 
-export function FieldDiaryScreen({projectId,projectName}:{projectId?:string;projectName?:string}){
-  const{toast}=useToast();const[entries,setEntries]=useState<DiaryEntry[]>([]);const[loading,setLoading]=useState(false);const[saving,setSaving]=useState(false);const[online,setOnline]=useState(true);const[hasDraft,setHasDraft]=useState(false);const[form,setForm]=useState<FormState>(initialForm())
-  const draftKey=projectId?`${DRAFT_PREFIX}${projectId}`:''
+type DraftMeta = { savedAt: string }
 
-  const load=async()=>{if(!projectId)return;setLoading(true);try{setEntries((await listDiary(projectId)).items)}catch(e){toast({title:'تعذر تحميل السجل السابق',description:e instanceof Error?e.message:'خطأ غير معروف',variant:'destructive'})}finally{setLoading(false)}}
-  useEffect(()=>{setOnline(navigator.onLine);const on=()=>setOnline(true),off=()=>setOnline(false);addEventListener('online',on);addEventListener('offline',off);return()=>{removeEventListener('online',on);removeEventListener('offline',off)}},[])
-  useEffect(()=>{load()},[projectId])
-  useEffect(()=>{if(!draftKey)return;try{const raw=localStorage.getItem(draftKey);if(raw){setForm({...initialForm(),...JSON.parse(raw)});setHasDraft(true)}}catch{}} , [draftKey])
-  useEffect(()=>{if(!draftKey)return;const timer=setTimeout(()=>{try{localStorage.setItem(draftKey,JSON.stringify(form));setHasDraft(true)}catch{}},500);return()=>clearTimeout(timer)},[form,draftKey])
+const initialForm = (): FormState => ({
+  diary_date: new Date().toISOString().slice(0, 10),
+  weather: '',
+  workers: '',
+  equipment: '',
+  visits_total: '0',
+  visits_accepted: '0',
+  observations: '',
+  gps_tag: null,
+})
 
-  const totals=useMemo(()=>({workers:Math.max(0,Number(form.workers)||0),total:Math.max(0,Number(form.visits_total)||0),accepted:Math.max(0,Number(form.visits_accepted)||0)}),[form])
-  const valid=!!projectId&&!!form.diary_date&&totals.accepted<=totals.total
-  const gps=()=>navigator.geolocation?.getCurrentPosition(p=>setForm(f=>({...f,gps_tag:{lat:p.coords.latitude,lng:p.coords.longitude,accuracy_m:Math.round(p.coords.accuracy),captured_at:new Date().toISOString()}})),()=>toast({title:'تعذر الحصول على الموقع',description:'تحقق من صلاحية الموقع في المتصفح',variant:'destructive'}))
-  const clearDraft=()=>{if(draftKey)localStorage.removeItem(draftKey);setHasDraft(false);setForm(initialForm());toast({title:'تم إلغاء المسودة'})}
-  const save=async()=>{if(!valid){toast({title:'تحقق من البيانات',description:totals.accepted>totals.total?'عدد الزيارات المقبولة لا يمكن أن يتجاوز الإجمالي':'اختر مشروعاً وأدخل التاريخ',variant:'destructive'});return}const payload={project_id:Number(projectId),diary_date:form.diary_date,weather:form.weather||null,workforce:{workers:totals.workers},equipment:form.equipment.split(',').map(s=>s.trim()).filter(Boolean),visits_total:totals.total,visits_accepted:totals.accepted,observations:form.observations||null,gps_tag:form.gps_tag,attachments:[]};setSaving(true);try{if(!online){throw new Error('OFFLINE')}await saveDiary(payload);if(draftKey)localStorage.removeItem(draftKey);setHasDraft(false);await load();toast({title:'تم حفظ سجل الموقع',description:'تم حفظ السجل على الخادم'});setForm(initialForm())}catch(e){if(draftKey)localStorage.setItem(draftKey,JSON.stringify(payload));setHasDraft(true);toast({title:'تم حفظ المسودة محلياً',description:'ستبقى البيانات حتى تعود للاتصال ويمكنك حفظها من جديد',variant:'destructive'})}finally{setSaving(false)}}
+function isFormState(value: unknown): value is FormState {
+  if (!value || typeof value !== 'object') return false
+  const v = value as Record<string, unknown>
+  return typeof v.diary_date === 'string' && typeof v.observations === 'string'
+}
+
+export function FieldDiaryScreen({ projectId, projectName }: { projectId?: string; projectName?: string }) {
+  const { toast } = useToast()
+  const [entries, setEntries] = useState<DiaryEntry[]>([])
+  const [loading, setLoading] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [online, setOnline] = useState(true)
+  const [hasDraft, setHasDraft] = useState(false)
+  const [draftSavedAt, setDraftSavedAt] = useState<string | null>(null)
+  const [form, setForm] = useState<FormState>(initialForm())
+  const draftKey = projectId ? `${DRAFT_PREFIX}${projectId}` : ''
+  const draftMetaKey = projectId ? `${DRAFT_META_PREFIX}${projectId}` : ''
+
+  const load = async () => {
+    if (!projectId) return
+    setLoading(true)
+    try {
+      setEntries((await listDiary(projectId)).items)
+    } catch (e) {
+      toast({ title: 'تعذر تحميل السجل السابق', description: e instanceof Error ? e.message : 'خطأ غير معروف', variant: 'destructive' })
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    const sync = () => setOnline(navigator.onLine)
+    sync()
+    addEventListener('online', sync)
+    addEventListener('offline', sync)
+    return () => {
+      removeEventListener('online', sync)
+      removeEventListener('offline', sync)
+    }
+  }, [])
+
+  useEffect(() => { load() }, [projectId])
+
+  useEffect(() => {
+    setHasDraft(false)
+    setDraftSavedAt(null)
+    setForm(initialForm())
+    if (!draftKey) return
+    try {
+      const raw = localStorage.getItem(draftKey)
+      const metaRaw = draftMetaKey ? localStorage.getItem(draftMetaKey) : null
+      if (raw) {
+        const parsed = JSON.parse(raw)
+        if (isFormState(parsed)) {
+          setForm({ ...initialForm(), ...parsed })
+          setHasDraft(true)
+          if (metaRaw) setDraftSavedAt((JSON.parse(metaRaw) as DraftMeta).savedAt || null)
+        }
+      }
+    } catch {
+      localStorage.removeItem(draftKey)
+      if (draftMetaKey) localStorage.removeItem(draftMetaKey)
+    }
+  }, [draftKey, draftMetaKey])
+
+  useEffect(() => {
+    if (!draftKey || !projectId) return
+    const timer = setTimeout(() => {
+      try {
+        const savedAt = new Date().toISOString()
+        localStorage.setItem(draftKey, JSON.stringify(form))
+        if (draftMetaKey) localStorage.setItem(draftMetaKey, JSON.stringify({ savedAt } satisfies DraftMeta))
+        setHasDraft(true)
+        setDraftSavedAt(savedAt)
+      } catch {
+        // Storage can be unavailable in private/restricted browser modes.
+      }
+    }, 500)
+    return () => clearTimeout(timer)
+  }, [form, draftKey, draftMetaKey, projectId])
+
+  const totals = useMemo(() => ({
+    workers: Math.max(0, Number(form.workers) || 0),
+    total: Math.max(0, Number(form.visits_total) || 0),
+    accepted: Math.max(0, Number(form.visits_accepted) || 0),
+  }), [form])
+
+  const valid = !!projectId && !!form.diary_date && totals.accepted <= totals.total
+  const draftText = draftSavedAt ? new Date(draftSavedAt).toLocaleTimeString('ar-SA', { hour: '2-digit', minute: '2-digit' }) : null
+
+  const gps = () => {
+    if (!navigator.geolocation) {
+      toast({ title: 'تحديد الموقع غير متاح', description: 'المتصفح أو الجهاز لا يدعم GPS', variant: 'destructive' })
+      return
+    }
+    navigator.geolocation.getCurrentPosition(
+      p => setForm(f => ({ ...f, gps_tag: { lat: p.coords.latitude, lng: p.coords.longitude, accuracy_m: Math.round(p.coords.accuracy), captured_at: new Date().toISOString() } })),
+      () => toast({ title: 'تعذر الحصول على الموقع', description: 'تحقق من صلاحية الموقع في المتصفح', variant: 'destructive' }),
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 30000 }
+    )
+  }
+
+  const clearDraft = () => {
+    if (draftKey) localStorage.removeItem(draftKey)
+    if (draftMetaKey) localStorage.removeItem(draftMetaKey)
+    setHasDraft(false)
+    setDraftSavedAt(null)
+    setForm(initialForm())
+    toast({ title: 'تم مسح المسودة', description: 'يمكنك بدء سجل جديد لهذا المشروع' })
+  }
+
+  const restoreDraft = () => {
+    if (!draftKey) return
+    try {
+      const raw = localStorage.getItem(draftKey)
+      if (!raw) return
+      const parsed = JSON.parse(raw)
+      if (isFormState(parsed)) {
+        setForm({ ...initialForm(), ...parsed })
+        toast({ title: 'تمت استعادة المسودة' })
+      }
+    } catch {
+      toast({ title: 'تعذر استعادة المسودة', variant: 'destructive' })
+    }
+  }
+
+  const save = async () => {
+    if (!valid) {
+      toast({ title: 'تحقق من البيانات', description: totals.accepted > totals.total ? 'عدد الزيارات المقبولة لا يمكن أن يتجاوز الإجمالي' : 'اختر مشروعاً وأدخل التاريخ', variant: 'destructive' })
+      return
+    }
+    const payload = {
+      project_id: Number(projectId),
+      diary_date: form.diary_date,
+      weather: form.weather || null,
+      workforce: { workers: totals.workers },
+      equipment: form.equipment.split(',').map(s => s.trim()).filter(Boolean),
+      visits_total: totals.total,
+      visits_accepted: totals.accepted,
+      observations: form.observations || null,
+      gps_tag: form.gps_tag,
+      attachments: [],
+    }
+    setSaving(true)
+    try {
+      if (!online) throw new Error('OFFLINE')
+      await saveDiary(payload)
+      if (draftKey) localStorage.removeItem(draftKey)
+      if (draftMetaKey) localStorage.removeItem(draftMetaKey)
+      setHasDraft(false)
+      setDraftSavedAt(null)
+      await load()
+      toast({ title: 'تم حفظ سجل الموقع', description: 'تم حفظ السجل على الخادم بنجاح' })
+      setForm(initialForm())
+    } catch {
+      // Keep the canonical form state in localStorage; do not store the API payload
+      // because its snake_case keys cannot be safely restored into the input model.
+      try {
+        if (draftKey) localStorage.setItem(draftKey, JSON.stringify(form))
+        if (draftMetaKey) {
+          const savedAt = new Date().toISOString()
+          localStorage.setItem(draftMetaKey, JSON.stringify({ savedAt } satisfies DraftMeta))
+          setDraftSavedAt(savedAt)
+        }
+        setHasDraft(true)
+      } catch { /* best effort */ }
+      toast({ title: 'تم حفظ المسودة محلياً', description: online ? 'تعذر الوصول للخادم. لم تُفقد البيانات ويمكن إعادة المحاولة.' : 'أنت غير متصل. ستبقى البيانات على الجهاز حتى تعود للاتصال.', variant: 'destructive' })
+    } finally {
+      setSaving(false)
+    }
+  }
 
   return <div className="space-y-5" dir="rtl">
-    <div className="flex flex-wrap items-start justify-between gap-3"><div><div className="flex items-center gap-2"><CalendarDays className="w-5 h-5 text-emerald-600"/><h2 className="text-2xl font-bold">سجل الموقع اليومي</h2>{hasDraft&&<Badge variant="outline">مسودة محفوظة</Badge>}</div><p className="text-sm text-gray-500 mt-1">{projectName||'اختر مشروعاً من الشريط العلوي قبل الإدخال'}</p></div>{!online&&<Badge><WifiOff className="w-3 h-3 ml-1"/>أوفلاين — الحفظ المحلي مفعل</Badge>}</div>
-    {!projectId&&<div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">لا يمكن إنشاء سجل قبل اختيار مشروع. اختر المشروع من أعلى الشاشة.</div>}
+    <div className="flex flex-wrap items-start justify-between gap-3">
+      <div>
+        <div className="flex items-center gap-2"><CalendarDays className="w-5 h-5 text-emerald-600"/><h2 className="text-2xl font-bold">سجل الموقع اليومي</h2>{hasDraft && <Badge variant="outline">مسودة محفوظة</Badge>}</div>
+        <p className="text-sm text-gray-500 mt-1">{projectName || 'اختر مشروعاً من الشريط العلوي قبل الإدخال'}</p>
+      </div>
+      <div className="flex items-center gap-2">
+        {!online && <Badge><WifiOff className="w-3 h-3 ml-1"/>أوفلاين</Badge>}
+        {hasDraft && draftText && <span className="text-[11px] text-gray-500 flex items-center gap-1"><CloudOff className="w-3 h-3"/>آخر حفظ محلي {draftText}</span>}
+      </div>
+    </div>
+    {!projectId && <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">لا يمكن إنشاء سجل قبل اختيار مشروع. اختر المشروع من أعلى الشاشة.</div>}
+    {hasDraft && <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 flex flex-wrap items-center justify-between gap-2 text-sm text-emerald-800"><span>توجد مسودة غير مرسلة لهذا المشروع.</span><div className="flex gap-2"><Button size="sm" variant="outline" onClick={restoreDraft}><RotateCcw className="w-3.5 h-3.5 ml-1"/>استعادة المسودة</Button><Button size="sm" variant="ghost" onClick={clearDraft}><Trash2 className="w-3.5 h-3.5 ml-1"/>مسحها</Button></div></div>}
     <div className="grid lg:grid-cols-3 gap-4">
       <div className="lg:col-span-2 bg-white border rounded-xl p-5 space-y-5">
         <div className="grid sm:grid-cols-2 gap-4">
