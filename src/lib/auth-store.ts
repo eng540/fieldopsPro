@@ -1,13 +1,11 @@
 // FieldOps V4 — Auth State Management (Zustand)
-// Wired to FastAPI /auth/login, /auth/refresh, /auth/logout
-// Uses JWT access_token + HttpOnly cookie refresh_token
+// Hardened authentication lifecycle for FastAPI /auth/login, /auth/refresh, /auth/logout.
+// Access token is persisted only because the existing API client reads the persisted
+// Zustand state. Refresh is serialized to avoid a refresh storm when several requests
+// observe an expired token at once.
 
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-
-// ============================================================
-// Types
-// ============================================================
 
 export interface AuthUser {
   id: string
@@ -36,10 +34,8 @@ export interface AuthState {
   isAuthenticated: boolean
   isLoading: boolean
   error: string | null
-
-  // Actions
   login: (email: string, password: string) => Promise<void>
-  logout: () => Promise<void>
+  logout: (remote?: boolean) => Promise<void>
   refreshAccessToken: () => Promise<void>
   setUser: (user: AuthUser) => void
   clearError: () => void
@@ -47,15 +43,30 @@ export interface AuthState {
   hasAnyRole: (roles: string[]) => boolean
 }
 
-// ============================================================
-// API Base URL
-// ============================================================
-
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'
 
-// ============================================================
-// Store
-// ============================================================
+let refreshInFlight: Promise<void> | null = null
+let refreshTimer: ReturnType<typeof setTimeout> | null = null
+
+function scheduleRefresh(expiresAt: number | undefined) {
+  if (typeof window === 'undefined' || !expiresAt) return
+  if (refreshTimer) clearTimeout(refreshTimer)
+
+  // Refresh one minute before expiry, with a small safety floor.
+  const delay = Math.max(10_000, expiresAt - Date.now() - 60_000)
+  refreshTimer = setTimeout(() => {
+    useAuthStore.getState().refreshAccessToken().catch(() => undefined)
+  }, delay)
+}
+
+function clearRefreshTimer() {
+  if (refreshTimer) clearTimeout(refreshTimer)
+  refreshTimer = null
+}
+
+async function parseResponse(res: Response): Promise<any> {
+  return res.json().catch(() => ({}))
+}
 
 export const useAuthStore = create<AuthState>()(
   persist(
@@ -68,21 +79,22 @@ export const useAuthStore = create<AuthState>()(
 
       login: async (email: string, password: string) => {
         set({ isLoading: true, error: null })
+        clearRefreshTimer()
 
         try {
           const res = await fetch(`${API_BASE}/auth/login`, {
             method: 'POST',
+            credentials: 'include',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ email, password }),
           })
+          const data = await parseResponse(res)
 
-          const data = await res.json()
-
-          if (!res.ok) {
-            throw new Error(data.detail || 'فشل تسجيل الدخول')
+          if (!res.ok) throw new Error(data.detail || 'فشل تسجيل الدخول')
+          if (!data.access_token || !data.session_id || !data.user) {
+            throw new Error('استجابة المصادقة غير مكتملة من الخادم')
           }
 
-          // Map FastAPI response to AuthUser
           const user: AuthUser = {
             id: String(data.user.id),
             orgId: String(data.user.org_id),
@@ -92,97 +104,110 @@ export const useAuthStore = create<AuthState>()(
             roles: data.user.assignments?.map((a: any) => a.role?.name).filter(Boolean) || [],
             assignments: data.user.assignments?.map((a: any) => ({
               projectId: String(a.project_id),
-              project: { id: String(a.project_id), name: a.project?.name || '', code: a.project?.code || '' },
+              project: {
+                id: String(a.project_id),
+                name: a.project?.name || '',
+                code: a.project?.code || '',
+              },
               role: { id: String(a.role_id), name: a.role?.name || '' },
             })) || [],
           }
 
-          set({
-            user,
-            tokens: {
-              accessToken: data.access_token,
-              refreshToken: data.refresh_token || '',
-              sessionId: data.session_id || '',
-              expiresAt: Date.now() + ((data.expires_in || 900) * 1000),
-            },
-            isAuthenticated: true,
-            isLoading: false,
-            error: null,
-          })
+          const expiresAt = Date.now() + ((data.expires_in || 900) * 1000)
+          const tokens: AuthTokens = {
+            accessToken: data.access_token,
+            // Keep the body token as a compatibility fallback. Production refresh
+            // also uses the HttpOnly cookie through credentials: include.
+            refreshToken: data.refresh_token || '',
+            sessionId: data.session_id,
+            expiresAt,
+          }
+
+          set({ user, tokens, isAuthenticated: true, isLoading: false, error: null })
+          scheduleRefresh(expiresAt)
         } catch (err: any) {
-          set({
-            isLoading: false,
-            error: err.message || 'حدث خطأ أثناء تسجيل الدخول',
-          })
+          set({ isLoading: false, error: err?.message || 'حدث خطأ أثناء تسجيل الدخول' })
           throw err
         }
       },
 
-      logout: async () => {
+      logout: async (remote = true) => {
         const { tokens } = get()
+        clearRefreshTimer()
+
         try {
-          if (tokens?.accessToken) {
+          if (remote && tokens?.accessToken) {
             await fetch(`${API_BASE}/auth/logout`, {
               method: 'POST',
+              credentials: 'include',
               headers: {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${tokens.accessToken}`,
               },
-              body: JSON.stringify({
-                session_id: tokens.sessionId,
-                revoke_all: true,
-              }),
-            }).catch(() => {})
+              body: JSON.stringify({ session_id: tokens.sessionId, revoke_all: false }),
+            }).catch(() => undefined)
           }
         } finally {
-          set({
-            user: null,
-            tokens: null,
-            isAuthenticated: false,
-            error: null,
-          })
+          set({ user: null, tokens: null, isAuthenticated: false, isLoading: false, error: null })
         }
       },
 
       refreshAccessToken: async () => {
-        const { tokens } = get()
-        if (!tokens?.refreshToken) return
+        if (refreshInFlight) return refreshInFlight
 
-        try {
-          const res = await fetch(`${API_BASE}/auth/refresh`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ refresh_token: tokens.refreshToken }),
-          })
+        const current = get().tokens
+        if (!current?.refreshToken && !current?.sessionId) {
+          await get().logout(false)
+          throw new Error('No refresh session available')
+        }
 
-          if (res.ok) {
-            const data = await res.json()
+        refreshInFlight = (async () => {
+          try {
+            // Send the refresh token body for compatibility and the HttpOnly cookie
+            // as the preferred production mechanism. The backend accepts either.
+            const res = await fetch(`${API_BASE}/auth/refresh`, {
+              method: 'POST',
+              credentials: 'include',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(current.refreshToken ? { refresh_token: current.refreshToken } : {}),
+            })
+            const data = await parseResponse(res)
+
+            if (!res.ok || !data.access_token) {
+              throw new Error(data.detail || `Refresh failed (${res.status})`)
+            }
+
+            const expiresAt = Date.now() + ((data.expires_in || 900) * 1000)
+            // Backend currently rotates the refresh token in the cookie. If a
+            // refresh_token is returned in a future version, retain that too.
             set({
               tokens: {
-                ...tokens,
+                ...get().tokens!,
                 accessToken: data.access_token,
-                expiresAt: Date.now() + ((data.expires_in || 900) * 1000),
+                refreshToken: data.refresh_token || get().tokens!.refreshToken,
+                expiresAt,
               },
+              isAuthenticated: true,
+              error: null,
             })
+            scheduleRefresh(expiresAt)
+          } catch (err: any) {
+            // A failed refresh means the session cannot be trusted. Clear local
+            // state without making another authenticated network request.
+            await get().logout(false)
+            throw err
+          } finally {
+            refreshInFlight = null
           }
-        } catch {
-          set({ user: null, tokens: null, isAuthenticated: false })
-        }
+        })()
+
+        return refreshInFlight
       },
 
       setUser: (user: AuthUser) => set({ user }),
-
       clearError: () => set({ error: null }),
-
-      hasRole: (role: string) => {
-        const { user } = get()
-        return user?.roles?.includes(role) || false
-      },
-
-      hasAnyRole: (roles: string[]) => {
-        const { user } = get()
-        return roles.some(r => user?.roles?.includes(r)) || false
-      },
+      hasRole: (role: string) => get().user?.roles?.includes(role) || false,
+      hasAnyRole: (roles: string[]) => roles.some(r => get().user?.roles?.includes(r)) || false,
     }),
     {
       name: 'fieldops-auth',
@@ -191,6 +216,12 @@ export const useAuthStore = create<AuthState>()(
         tokens: state.tokens,
         isAuthenticated: state.isAuthenticated,
       }),
+      onRehydrateStorage: () => (state) => {
+        // Re-establish the proactive refresh cycle after a browser reload.
+        if (state?.isAuthenticated && state.tokens?.expiresAt) {
+          scheduleRefresh(state.tokens.expiresAt)
+        }
+      },
     }
   )
 )
