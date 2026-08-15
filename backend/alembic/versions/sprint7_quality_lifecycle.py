@@ -1,13 +1,13 @@
 """Sprint-7: Quality remark lifecycle ledger.
 
 Revision ID: sprint7_quality_001
-Revises: sprint6_epic1_001
+Revises: sprint6_dict_001
 """
 from alembic import op
 import sqlalchemy as sa
 
 revision = "sprint7_quality_001"
-down_revision = "sprint6_epic1_001"
+down_revision = "sprint6_dict_001"
 branch_labels = None
 depends_on = None
 
