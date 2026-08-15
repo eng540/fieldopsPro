@@ -72,7 +72,25 @@ export default function FieldOpsApp() {
   useEffect(() => { setIsMounted(true) }, [])
   useEffect(() => { if (isMounted && !isAuthenticated) router.push('/login') }, [isMounted, isAuthenticated, router])
   useEffect(() => { if (user?.orgId) setOrgId(user.orgId) }, [user])
-  const loadAllData = useCallback(async () => { try { const [a,b,c,d,e] = await Promise.all([getProjectsHybrid(orgId), getUsersHybrid(orgId), getRemarksHybrid(orgId), getAuditLogsHybrid(orgId), getDictionariesHybrid(orgId)]); if (a.data) { setProjects(a.data); if (a.data.length) setSelectedProject(current => current ?? a.data[0]) }; if (b.data) setUsers(b.data); if (c.data) setRemarks(c.data); if (d.data) setAuditLogs(d.data); if (e.data) setDictionaries(e.data); const pending = await getPendingSyncItems(); setConflicts(pending.filter(i => i.status === 'CONFLICT' || i.status === 'FAILED')) } catch (err) { console.error('Load error:', err) } }, [orgId])
+  const loadAllData = useCallback(async () => {
+    try {
+      const [a,b,c,d,e] = await Promise.all([getProjectsHybrid(orgId), getUsersHybrid(orgId), getRemarksHybrid(orgId), getAuditLogsHybrid(orgId), getDictionariesHybrid(orgId)])
+      if (a.data) {
+        setProjects(a.data)
+        setSelectedProject(current => {
+          if (!a.data.length) return null
+          if (!current) return a.data[0]
+          return a.data.find(p => p.id === current.id) ?? a.data[0]
+        })
+      }
+      if (b.data) setUsers(b.data)
+      if (c.data) setRemarks(c.data)
+      if (d.data) setAuditLogs(d.data)
+      if (e.data) setDictionaries(e.data)
+      const pending = await getPendingSyncItems()
+      setConflicts(pending.filter(i => i.status === 'CONFLICT' || i.status === 'FAILED'))
+    } catch (err) { console.error('Load error:', err) }
+  }, [orgId])
   useEffect(() => { registerServiceWorker() }, []); useEffect(() => { if (isAuthenticated && orgId) loadAllData() }, [isAuthenticated, orgId, loadAllData])
   const handleRealSync = useCallback(async () => { setIsSyncing(true); try { await fullDataSync(orgId); await processSyncQueue(); await loadAllData(); triggerBackgroundSync(); toast({ title: 'تمت المزامنة', description: 'تم تحديث البيانات' }) } catch (err) { console.error(err); toast({ title: 'فشل المزامنة', variant: 'destructive' }) } finally { setIsSyncing(false) } }, [orgId, loadAllData, toast])
   const handleLogout = () => { logout(); router.push('/login') }
@@ -87,7 +105,7 @@ export default function FieldOpsApp() {
       <main className="flex-1 overflow-y-auto"><div className="p-4 md:p-6 max-w-7xl mx-auto">
         {activeTab==='dashboard'&&wrap('لوحة التحكم', <>{workflow}<ProjectWorkflowBridge project={selectedProject} remarks={remarks} onNavigate={navigate}/><DashboardScreen projects={projects} selectedProject={selectedProject} users={users} remarks={remarks} auditLogs={auditLogs} dictionaries={dictionaries} onNavigate={navigate}/></>)}
         {activeTab==='operations'&&wrap('مركز التشغيل', <><OperationalWorkflowRail project={selectedProject} remarks={remarks} online={isOnline} pendingCount={conflicts.length} onNavigate={navigate}/><OperationsCenterScreen selectedProject={selectedProject}/></>)}
-        {activeTab==='diary'&&wrap('السجل اليومي', <><OperationalWorkflowRail project={selectedProject} remarks={remarks} online={isOnline} pendingCount={conflicts.length} onNavigate={navigate}/><FieldDiaryScreen projectId={selectedProject?.id} projectName={selectedProject?.name}/></>)}
+        {activeTab==='diary'&&wrap('السجل اليومي', <><OperationalWorkflowRail project={selectedProject} remarks={remarks} online={isOnline} pendingCount={conflicts.length} onNavigate={navigate}/><FieldDiaryScreen projectId={selectedProject?.id} projectName={selectedProject?.name} onChanged={loadAllData}/></>)}
         {activeTab==='reports'&&wrap('التقارير', <><OperationalWorkflowRail project={selectedProject} remarks={remarks} online={isOnline} pendingCount={conflicts.length} onNavigate={navigate}/><LegacyReportsScreen/></>)}
         {activeTab==='mobile'&&wrap('المركز الميداني', <FieldMobileCenterScreen/>)}
         {activeTab==='projects'&&wrap('المشاريع', <ProjectsScreen projects={projects} selectedProject={selectedProject} onSelectProject={setSelectedProject} orgId={orgId} onRefresh={loadAllData} dictionaries={dictionaries}/>)}
@@ -96,9 +114,9 @@ export default function FieldOpsApp() {
         {activeTab==='work-orders'&&wrap('أوامر العمل', <WorkOrdersScreen project={selectedProject} orgId={orgId} onRefresh={loadAllData}/>)}
         {activeTab==='quality'&&wrap('الجودة', <><OperationalWorkflowRail project={selectedProject} remarks={remarks} online={isOnline} pendingCount={conflicts.length} onNavigate={navigate}/><ProjectWorkflowBridge project={selectedProject} remarks={remarks} onNavigate={navigate}/><QualityScreen project={selectedProject} remarks={remarks} orgId={orgId} onRefresh={loadAllData}/></>)}
         {activeTab==='governance'&&wrap('الحوكمة', <GovernanceScreen orgId={orgId} onRefresh={loadAllData}/>)}
-        {activeTab==='users'&&wrap('المستخدمون', <UsersScreen users={users} projects={projects} orgId={orgId} onRefresh={loadAllData}/>)}
-        {activeTab==='dictionary'&&wrap('القاموس', <DictionaryScreen dictionaries={dictionaries} orgId={orgId} onRefresh={loadAllData}/>)}
-        {activeTab==='audit'&&wrap('التدقيق', <AuditScreen auditLogs={auditLogs} orgId={orgId} onRefresh={loadAllData}/>)}
+        {activeTab==='users'&&wrap('المستخدمون', <UsersScreen users={users} projects={projects} orgId={orgId} onRefresh={loadAllData}/>) }
+        {activeTab==='dictionary'&&wrap('القاموس', <DictionaryScreen dictionaries={dictionaries} orgId={orgId} onRefresh={loadAllData}/>) }
+        {activeTab==='audit'&&wrap('التدقيق', <AuditScreen auditLogs={auditLogs} orgId={orgId} onRefresh={loadAllData}/>) }
         {activeTab==='settings'&&wrap('الإعدادات', <div className="space-y-6"><SettingsScreen orgId={orgId}/><ConflictResolutionPanel conflicts={conflicts} serverDataMap={Object.fromEntries(conflicts.filter(c=>c.serverData).map(c=>{try{return [c.operationUuid,JSON.parse(c.serverData!)]}catch{return [c.operationUuid,{}]}}))} onResolve={()=>loadAllData()} onRefresh={loadAllData}/></div>)}
       </div></main></div><SyncNotifications orgId={orgId}/></div>
 }
