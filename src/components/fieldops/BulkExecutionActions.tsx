@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Select, SelectContent, SelectItem, SelectValue } from '@/components/ui/select'
 import { Badge } from '@/components/ui/badge'
 
 interface Props {
@@ -25,23 +25,31 @@ export function BulkExecutionActions({ units, selectedUnitIds, onApply, disabled
 
   const groups = useMemo(() => {
     const map = new Map<string, any[]>()
-    for (const unit of units) for (const item of unit.boqItems || []) {
-      const code = String(item.code ?? item.boqCode ?? item.boq_code ?? item.id)
-      const key = code.includes('-') ? code.split('-')[0] : /^[A-Za-z]/.test(code) ? code[0].toUpperCase() : 'OTHER'
-      if (!map.has(key)) map.set(key, [])
-      map.get(key)!.push(item)
+    for (const unit of units) {
+      for (const item of unit.boqItems || []) {
+        const code = String(item.code ?? item.boqCode ?? item.boq_code ?? item.id)
+        const key = code.includes('-') ? code.split('-')[0] : /^[A-Za-z]/.test(code) ? code[0].toUpperCase() : 'OTHER'
+        if (!map.has(key)) map.set(key, [])
+        map.get(key)!.push(item)
+      }
     }
     return Array.from(map.entries()).sort(([a], [b]) => a.localeCompare(b))
   }, [units])
 
   const targetItems = useMemo(() => {
     const selected = units.filter(u => selectedUnitIds.has(Number(u.id)))
-    if (group === 'ALL') return Array.from(new Map(selected.flatMap(u => (u.boqItems || []).map((i: any) => [Number(i.id), i]))).keys())
-    return Array.from(new Map(selected.flatMap(u => (u.boqItems || []).filter((i: any) => {
+    const items = selected.flatMap(u => (u.boqItems || []) as any[])
+    if (group === 'ALL') {
+      return Array.from(new Map(items.map((i: any) => [Number(i.id), i])).values()).map((i: any) => Number(i.id))
+    }
+
+    const filtered = items.filter((i: any) => {
       const code = String(i.code ?? i.boqCode ?? i.boq_code ?? i.id)
       const key = code.includes('-') ? code.split('-')[0] : /^[A-Za-z]/.test(code) ? code[0].toUpperCase() : 'OTHER'
       return key === group
-    }).map((i: any) => [Number(i.id), i])).keys())
+    })
+
+    return Array.from(new Map(filtered.map((i: any) => [Number(i.id), i])).values()).map((i: any) => Number(i.id))
   }, [units, selectedUnitIds, group])
 
   const apply = () => {
