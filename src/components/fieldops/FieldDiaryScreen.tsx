@@ -43,7 +43,7 @@ function isFormState(value: unknown): value is FormState {
   return typeof v.diary_date === 'string' && typeof v.observations === 'string'
 }
 
-export function FieldDiaryScreen({ projectId, projectName }: { projectId?: string; projectName?: string }) {
+export function FieldDiaryScreen({ projectId, projectName, onChanged }: { projectId?: string; projectName?: string; onChanged?: () => void | Promise<void> }) {
   const { toast } = useToast()
   const [entries, setEntries] = useState<DiaryEntry[]>([])
   const [loading, setLoading] = useState(false)
@@ -189,11 +189,10 @@ export function FieldDiaryScreen({ projectId, projectName }: { projectId?: strin
       setHasDraft(false)
       setDraftSavedAt(null)
       await load()
+      await onChanged?.()
       toast({ title: 'تم حفظ سجل الموقع', description: 'تم حفظ السجل على الخادم بنجاح' })
       setForm(initialForm())
     } catch {
-      // Keep the canonical form state in localStorage; do not store the API payload
-      // because its snake_case keys cannot be safely restored into the input model.
       try {
         if (draftKey) localStorage.setItem(draftKey, JSON.stringify(form))
         if (draftMetaKey) {
