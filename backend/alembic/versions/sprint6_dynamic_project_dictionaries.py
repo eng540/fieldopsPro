@@ -1,13 +1,13 @@
 """Sprint-6: Dynamic project/org dictionaries.
 
 Revision ID: sprint6_dict_001
-Revises: sprint5_rls_001
+Revises: sprint6_epic1_001
 """
 from alembic import op
 import sqlalchemy as sa
 
 revision = "sprint6_dict_001"
-down_revision = "sprint5_rls_001"
+down_revision = "sprint6_epic1_001"
 branch_labels = None
 depends_on = None
 
