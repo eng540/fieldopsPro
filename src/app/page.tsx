@@ -64,15 +64,47 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'settings', label: 'الإعدادات', icon: Settings },
 ]
 
+function BootstrapFallback({ message, detail, onRetry }: { message: string; detail?: string; onRetry?: () => void }) {
+  return <div className="min-h-screen flex items-center justify-center bg-gray-50 p-6" dir="rtl"><section className="w-full max-w-md rounded-2xl border border-emerald-100 bg-white p-7 text-center shadow-sm"><Loader2 className="w-8 h-8 animate-spin text-emerald-600 mx-auto mb-4"/><h1 className="text-base font-bold text-gray-900">{message}</h1>{detail?<p className="mt-2 text-sm leading-6 text-gray-600">{detail}</p>:null}{onRetry?<div className="mt-5 flex justify-center gap-2"><button type="button" onClick={onRetry} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white">إعادة المحاولة</button><button type="button" onClick={()=>window.location.reload()} className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700">تحديث التطبيق</button></div>:null}</section></div>
+}
+
 export default function FieldOpsApp() {
-  const router = useRouter(); const { isAuthenticated, user, logout } = useAuthStore()
-  const [isMounted, setIsMounted] = useState(false); const [activeTab, setActiveTab] = useState('dashboard'); const [isSyncing, setIsSyncing] = useState(false); const [orgId, setOrgId] = useState('demo'); const [conflicts, setConflicts] = useState<SyncQueueItem[]>([])
-  const [projects, setProjects] = useState<ProjectData[]>([]); const [selectedProject, setSelectedProject] = useState<ProjectData | null>(null); const [users, setUsers] = useState<UserData[]>([]); const [remarks, setRemarks] = useState<RemarkData[]>([]); const [auditLogs, setAuditLogs] = useState<AuditLogData[]>([]); const [dictionaries, setDictionaries] = useState<DictionaryData[]>([])
-  const isOnline = useOnlineStatus(); const { toast } = useToast()
+  const router = useRouter()
+  const { isAuthenticated, user, logout, isHydrated, isInitializing, bootstrapAuth, error: authError } = useAuthStore()
+  const [isMounted, setIsMounted] = useState(false)
+  const [activeTab, setActiveTab] = useState('dashboard')
+  const [isSyncing, setIsSyncing] = useState(false)
+  const [orgId, setOrgId] = useState('demo')
+  const [dataLoading, setDataLoading] = useState(false)
+  const [dataLoadError, setDataLoadError] = useState<string | null>(null)
+  const [conflicts, setConflicts] = useState<SyncQueueItem[]>([])
+  const [projects, setProjects] = useState<ProjectData[]>([])
+  const [selectedProject, setSelectedProject] = useState<ProjectData | null>(null)
+  const [users, setUsers] = useState<UserData[]>([])
+  const [remarks, setRemarks] = useState<RemarkData[]>([])
+  const [auditLogs, setAuditLogs] = useState<AuditLogData[]>([])
+  const [dictionaries, setDictionaries] = useState<DictionaryData[]>([])
+  const isOnline = useOnlineStatus()
+  const { toast } = useToast()
+
   useEffect(() => { setIsMounted(true) }, [])
-  useEffect(() => { if (isMounted && !isAuthenticated) router.push('/login') }, [isMounted, isAuthenticated, router])
+
+  // Explicit bootstrap: hydration must finish before auth is evaluated.
+  useEffect(() => {
+    if (!isMounted || !isHydrated) return
+    void bootstrapAuth()
+  }, [isMounted, isHydrated, bootstrapAuth])
+
+  useEffect(() => {
+    if (isMounted && isHydrated && !isInitializing && !isAuthenticated) router.replace('/login')
+  }, [isMounted, isHydrated, isInitializing, isAuthenticated, router])
+
   useEffect(() => { if (user?.orgId) setOrgId(user.orgId) }, [user])
+
   const loadAllData = useCallback(async () => {
+    if (!isAuthenticated || !orgId) return
+    setDataLoading(true)
+    setDataLoadError(null)
     try {
       const [a,b,c,d,e] = await Promise.all([getProjectsHybrid(orgId), getUsersHybrid(orgId), getRemarksHybrid(orgId), getAuditLogsHybrid(orgId), getDictionariesHybrid(orgId)])
       if (a.data) {
@@ -89,19 +121,40 @@ export default function FieldOpsApp() {
       if (e.data) setDictionaries(e.data)
       const pending = await getPendingSyncItems()
       setConflicts(pending.filter(i => i.status === 'CONFLICT' || i.status === 'FAILED'))
-    } catch (err) { console.error('Load error:', err) }
-  }, [orgId])
-  useEffect(() => { registerServiceWorker() }, []); useEffect(() => { if (isAuthenticated && orgId) loadAllData() }, [isAuthenticated, orgId, loadAllData])
+    } catch (err: any) {
+      console.error('[FieldOps Bootstrap] data load failed', err)
+      setDataLoadError(err?.message || 'تعذر تحميل بيانات المشروع')
+    } finally {
+      setDataLoading(false)
+    }
+  }, [isAuthenticated, orgId])
+
+  useEffect(() => { void registerServiceWorker() }, [])
+  useEffect(() => { if (isHydrated && !isInitializing && isAuthenticated && orgId) void loadAllData() }, [isHydrated, isInitializing, isAuthenticated, orgId, loadAllData])
+
   const handleRealSync = useCallback(async () => { setIsSyncing(true); try { await fullDataSync(orgId); await processSyncQueue(); await loadAllData(); triggerBackgroundSync(); toast({ title: 'تمت المزامنة', description: 'تم تحديث البيانات' }) } catch (err) { console.error(err); toast({ title: 'فشل المزامنة', variant: 'destructive' }) } finally { setIsSyncing(false) } }, [orgId, loadAllData, toast])
-  const handleLogout = () => { logout(); router.push('/login') }
-  const allowedNav = NAV_ITEMS.filter(item => !item.requireRole || item.requireRole.some(role => (user?.roles || []).includes(role))); const navigate = (id: string) => { if (allowedNav.some(item => item.id === id)) setActiveTab(id) }
+  const handleLogout = () => { void logout(); router.replace('/login') }
+  const allowedNav = NAV_ITEMS.filter(item => !item.requireRole || item.requireRole.some(role => (user?.roles || []).includes(role)))
+  const navigate = (id: string) => { if (allowedNav.some(item => item.id === id)) setActiveTab(id) }
   const openProjectConfiguration = () => { if (!selectedProject) { toast({ title: 'اختر مشروعاً أولاً', description: 'لا يمكن فتح إعدادات المشروع قبل اختيار مشروع.' }); return } router.push(`/projects/configuration?projectId=${encodeURIComponent(selectedProject.id)}`) }
   const handleProjectCreated = async (project?: ProjectData) => { await loadAllData(); if (project?.id) setSelectedProject(project); setActiveTab('projects') }
-  if (!isMounted || !isAuthenticated) return <div className="min-h-screen flex items-center justify-center bg-gray-50"><Loader2 className="w-8 h-8 animate-spin text-emerald-600" /></div>
+
+  if (!isMounted || !isHydrated || isInitializing) {
+    return <BootstrapFallback message="جاري تهيئة جلسة FieldOps..." detail="يتم أولاً التحقق من المصادقة ثم يبدأ تحميل بيانات المشروع. إذا تعذر الاتصال ستظهر رسالة خطأ بدلاً من استمرار التحميل." />
+  }
+
+  if (authError && !isAuthenticated) {
+    return <BootstrapFallback message="تعذر استعادة جلسة المصادقة" detail={authError} onRetry={() => void bootstrapAuth()} />
+  }
+
+  if (!isAuthenticated) return null
+
   const wrap = (name: string, node: React.ReactNode) => <ScreenErrorBoundary screenName={name}>{node}</ScreenErrorBoundary>
   const workflow = <OperationalWorkflowRail project={selectedProject} remarks={remarks} online={isOnline} pendingCount={conflicts.length} onNavigate={navigate}/>
+
   return <div className="min-h-screen flex flex-col bg-gray-50" dir="rtl">
-    <header className="sticky top-0 z-50 bg-white border-b border-gray-200 shadow-sm"><div className="flex items-center justify-between px-4 h-14"><div className="flex items-center gap-3"><div className="w-8 h-8 bg-emerald-600 rounded-lg flex items-center justify-center"><Building2 className="w-5 h-5 text-white" /></div><div><h1 className="text-sm font-bold">FieldOps V4</h1><p className="text-xs text-gray-500">منصة العمليات الميدانية</p></div></div><div className="flex items-center gap-2"><ProjectCreationDialog onCreated={handleProjectCreated} compact /><Button variant="outline" size="sm" className="gap-1" onClick={openProjectConfiguration} disabled={!selectedProject}><Settings className="w-3.5 h-3.5"/>إعداد المشروع</Button>{wrap('المزامنة', <SyncStatusBar orgId={orgId} onSync={handleRealSync} isSyncing={isSyncing} />)}<Select value={selectedProject?.id || ''} onValueChange={v=>{const p=projects.find(x=>x.id===v);if(p)setSelectedProject(p)}}><SelectTrigger className="w-48 text-xs h-8"><SelectValue placeholder="اختر مشروع"/></SelectTrigger><SelectContent>{projects.map(p=><SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}</SelectContent></Select><Button variant="outline" size="sm" onClick={handleRealSync} disabled={isSyncing}><RefreshCw className={`w-3.5 h-3.5 ml-1 ${isSyncing?'animate-spin':''}`}/>مزامنة</Button></div><div className="flex items-center gap-2 border-r pr-3"><div className="w-7 h-7 bg-emerald-100 rounded-full flex items-center justify-center"><span className="text-xs font-bold text-emerald-700">{user?.name?.charAt(0)||'م'}</span></div><div className="hidden lg:block"><p className="text-xs font-medium">{user?.name||'مستخدم'}</p><p className="text-[10px] text-gray-500">{user?.roles?.[0]||'مشاهد'}</p></div><Button variant="ghost" size="sm" className="h-7 w-7 p-0 text-gray-500 hover:text-red-600" onClick={handleLogout}><LogOut className="w-3.5 h-3.5"/></Button></div></div></header>
+    <header className="sticky top-0 z-50 bg-white border-b border-gray-200 shadow-sm"><div className="flex items-center justify-between px-4 h-14"><div className="flex items-center gap-3"><div className="w-8 h-8 bg-emerald-600 rounded-lg flex items-center justify-center"><Building2 className="w-5 h-5 text-white" /></div><div><h1 className="text-sm font-bold">FieldOps V4</h1><p className="text-xs text-gray-500">منصة العمليات الميدانية</p></div></div><div className="flex items-center gap-2"><ProjectCreationDialog onCreated={handleProjectCreated} compact /><Button variant="outline" size="sm" className="gap-1" onClick={openProjectConfiguration} disabled={!selectedProject}><Settings className="w-3.5 h-3.5"/>إعداد المشروع</Button>{wrap('المزامنة', <SyncStatusBar orgId={orgId} onSync={handleRealSync} isSyncing={isSyncing} />)}<Select value={selectedProject?.id || ''} onValueChange={v=>{const p=projects.find(x=>x.id===v);if(p)setSelectedProject(p)}}><SelectTrigger className="w-48 text-xs h-8"><SelectValue placeholder="اختر مشروع"/></SelectTrigger><SelectContent>{projects.map(p=><SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}</SelectContent></Select><Button variant="outline" size="sm" onClick={handleRealSync} disabled={isSyncing}><RefreshCw className={`w-3.5 h-3.5 ml-1 ${isSyncing?'animate-spin':''}`}/>مزامنة</Button></div><div className="flex items-center gap-2 border-r pr-3"><div className="w-7 h-7 bg-emerald-100 rounded-full flex items-center justify-center"><span className="text-xs font-bold text-emerald-700">{user?.name?.charAt(0)||'م'}</span></div><div className="hidden lg:block"><p className="text-xs font-medium">{user?.name||'مستخدم'}</p><p className="text-[10px] text-gray-500">{user?.roles?.[0]||'مشاهد'}</p></div><Button variant="ghost" size="sm" className="h-7 w-7 p-0 text-gray-500 hover:text-red-600" onClick={handleLogout}><LogOut className="w-3.5 h-3.5'/></Button></div></div></header>
+    {dataLoadError ? <div className="mx-4 mt-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900" dir="rtl"><div className="flex items-center justify-between gap-3"><div><strong>تعذر تحميل بعض بيانات المشروع.</strong><span className="mr-2 text-amber-700">{dataLoadError}</span></div><Button size="sm" variant="outline" onClick={()=>void loadAllData()} disabled={dataLoading}>{dataLoading?'جارٍ المحاولة...':'إعادة المحاولة'}</Button></div></div> : null}
     <div className="sticky top-14 z-40 bg-white border-b md:hidden"><div className="flex overflow-x-auto gap-1 px-2 py-1.5">{allowedNav.map(item=><button key={item.id} onClick={()=>navigate(item.id)} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs whitespace-nowrap ${activeTab===item.id?'bg-emerald-100 text-emerald-800':'bg-gray-100 text-gray-600'}`}>{item.label}{item.badge&&<Badge variant="outline" className="text-[9px] px-1 py-0 h-4">{item.badge}</Badge>}</button>)}</div></div>
     <div className="flex flex-1 overflow-hidden"><aside className="hidden md:flex md:w-60 lg:w-64 flex-col bg-white border-l overflow-y-auto"><nav className="flex-1 px-3 py-4 space-y-1">{allowedNav.map(item=><button key={item.id} onClick={()=>navigate(item.id)} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm ${activeTab===item.id?'bg-emerald-50 text-emerald-700 border border-emerald-200':'text-gray-600 hover:bg-gray-50'}`}>{item.label}{item.badge&&<Badge variant="outline" className="text-[9px] mr-auto px-1 py-0 h-4">{item.badge}</Badge>}</button>)}</nav><div className="px-3 py-4 border-t"><div className="bg-amber-50 border border-amber-200 rounded-lg p-3"><div className="flex items-center gap-2 text-amber-800 text-xs font-medium mb-1"><UploadCloud className="w-3.5 h-3.5"/>طابور المزامنة</div><p className="text-xs text-amber-600">{isOnline?'متصل — جاهز للمزامنة':'غير متصل — محفوظ محلياً'}</p><Button variant="ghost" size="sm" className="text-xs h-6 mt-1" onClick={()=>navigate('mobile')}><Settings className="w-3 h-3 ml-1"/>إدارة الميدان</Button></div></div></aside>
       <main className="flex-1 overflow-y-auto"><div className="p-4 md:p-6 max-w-7xl mx-auto">
@@ -113,9 +166,9 @@ export default function FieldOpsApp() {
         {activeTab==='projects'&&wrap('المشاريع', <ProjectsScreen projects={projects} selectedProject={selectedProject} onSelectProject={setSelectedProject} orgId={orgId} onRefresh={loadAllData} dictionaries={dictionaries}/>) }
         {activeTab==='speed-entry'&&wrap('الإدخال السريع', <div className="space-y-4">{workflow}<div className="flex items-center justify-between"><div><h2 className="text-2xl font-bold">مصفوفة الإدخال السريع</h2><p className="text-sm text-gray-500 mt-1">تحديث نسب الإنجاز — {selectedProject?.name||'اختر مشروعاً'}</p></div><Badge variant="outline"><WifiOff className="w-3 h-3 ml-1"/>أوفلاين</Badge></div><SpeedEntryGrid project={selectedProject} orgId={orgId} onRefresh={loadAllData}/></div>)}
         {activeTab==='bulk-import'&&wrap('الاستيراد من Excel', <><OperationalWorkflowRail project={selectedProject} remarks={remarks} online={isOnline} pendingCount={conflicts.length} onNavigate={navigate}/><BulkImportScreen project={selectedProject} orgId={orgId} onRefresh={loadAllData}/></>)}
-        {activeTab==='work-orders'&&wrap('أوامر العمل', <WorkOrdersScreen project={selectedProject} orgId={orgId} onRefresh={loadAllData}/>)}
+        {activeTab==='work-orders'&&wrap('أوامر العمل', <WorkOrdersScreen project={selectedProject} orgId={orgId} onRefresh={loadAllData}/>) }
         {activeTab==='quality'&&wrap('الجودة', <><OperationalWorkflowRail project={selectedProject} remarks={remarks} online={isOnline} pendingCount={conflicts.length} onNavigate={navigate}/><ProjectWorkflowBridge project={selectedProject} remarks={remarks} onNavigate={navigate}/><QualityScreen project={selectedProject} remarks={remarks} orgId={orgId} onRefresh={loadAllData}/></>)}
-        {activeTab==='governance'&&wrap('الحوكمة', <GovernanceScreen orgId={orgId} onRefresh={loadAllData}/>)}
+        {activeTab==='governance'&&wrap('الحوكمة', <GovernanceScreen orgId={orgId} onRefresh={loadAllData}/>) }
         {activeTab==='users'&&wrap('المستخدمون', <UsersScreen users={users} projects={projects} orgId={orgId} onRefresh={loadAllData}/>) }
         {activeTab==='dictionary'&&wrap('القاموس', <DictionaryScreen dictionaries={dictionaries} orgId={orgId} onRefresh={loadAllData}/> )}
         {activeTab==='audit'&&wrap('التدقيق', <AuditScreen auditLogs={auditLogs} orgId={orgId} onRefresh={loadAllData}/>) }
