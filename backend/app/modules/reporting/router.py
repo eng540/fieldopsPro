@@ -22,6 +22,60 @@ from app.modules.reporting.schemas import (
 router = APIRouter()
 
 
+async def _project_execution_rollups(db: AsyncSession, org_id: int, project_ids: list[int]) -> dict[int, dict[str, float | int]]:
+    """Read current execution state for reporting without mutating the project cache fields.
+
+    ExecutionEvent is the historical source of truth and UnitBoQProgress is its
+    materialized current-state read model. Reports consume this read model through
+    one aggregation shape instead of Project.completion_pct, which may be stale.
+    """
+    if not project_ids:
+        return {}
+    from app.modules.projects.models import ProjectUnit
+    from app.modules.execution.models import UnitBoQProgress
+    from app.modules.quality.models import Remark, RemarkStatus
+
+    state_rows = (await db.execute(
+        select(
+            ProjectUnit.project_id,
+            func.count(func.distinct(ProjectUnit.id)).label("total_units"),
+            func.avg(UnitBoQProgress.completion_pct).label("completion_pct"),
+            func.count(UnitBoQProgress.id).label("tracked_boq_items"),
+        )
+        .select_from(ProjectUnit)
+        .outerjoin(UnitBoQProgress, UnitBoQProgress.unit_id == ProjectUnit.id)
+        .where(
+            ProjectUnit.org_id == org_id,
+            ProjectUnit.project_id.in_(project_ids),
+            ProjectUnit.is_active.is_(True),
+        )
+        .group_by(ProjectUnit.project_id)
+    )).all()
+    remark_rows = (await db.execute(
+        select(ProjectUnit.project_id, func.count(Remark.id).label("open_remarks"))
+        .select_from(ProjectUnit)
+        .join(Remark, Remark.unit_id == ProjectUnit.id)
+        .where(
+            ProjectUnit.org_id == org_id,
+            ProjectUnit.project_id.in_(project_ids),
+            ProjectUnit.is_active.is_(True),
+            Remark.org_id == org_id,
+            Remark.status == RemarkStatus.OPEN.value,
+        )
+        .group_by(ProjectUnit.project_id)
+    )).all()
+    remarks_by_project = {int(row.project_id): int(row.open_remarks or 0) for row in remark_rows}
+    return {
+        int(row.project_id): {
+            "total_units": int(row.total_units or 0),
+            "completion_pct": round(float(row.completion_pct or 0.0), 2),
+            "tracked_boq_items": int(row.tracked_boq_items or 0),
+            "open_remarks": remarks_by_project.get(int(row.project_id), 0),
+        }
+        for row in state_rows
+    }
+
+
 @router.get("/summary", response_model=OrgSummary)
 async def org_summary(
     db: AsyncSession = Depends(get_db),
@@ -83,7 +137,7 @@ async def org_summary(
     pending_sync = (await db.execute(
         select(func.count()).select_from(WorkOrderSyncLog).where(
             WorkOrderSyncLog.org_id == org_id,
-            WorkOrderSyncLog.sync_status == SyncStatus.PROCESSED.value,
+            WorkOrderSyncLog.sync_status == SyncStatus.PENDING.value,
         )
     )).scalar_one()
 
@@ -104,31 +158,19 @@ async def project_progress(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ) -> dict:
-    """Per-project completion breakdown."""
+    """Per-project completion breakdown backed by the execution read model."""
     org_id = current_user["org_id"]
-
     from app.modules.projects.models import Project
     from app.modules.execution.models import WorkOrder, WorkOrderStatus
-    from app.modules.quality.models import Remark, RemarkStatus
 
     projects = (await db.execute(
         select(Project).where(Project.org_id == org_id, Project.is_active.is_(True))
     )).scalars().all()
+    rollups = await _project_execution_rollups(db, org_id, [p.id for p in projects])
 
     items = []
-    total_pct = 0.0
-
     for p in projects:
-        open_remarks_count = (await db.execute(
-            select(func.count()).select_from(Remark).where(
-                Remark.org_id == org_id,
-                Remark.unit_id.in_(
-                    select(func.distinct(Remark.unit_id)).where(Remark.org_id == org_id)
-                ),
-                Remark.status == RemarkStatus.OPEN.value,
-            )
-        )).scalar_one()
-
+        metrics = rollups.get(p.id, {"total_units": 0, "completion_pct": 0.0, "open_remarks": 0})
         active_wo_count = (await db.execute(
             select(func.count()).select_from(WorkOrder).where(
                 WorkOrder.org_id == org_id,
@@ -136,19 +178,17 @@ async def project_progress(
                 WorkOrder.status == WorkOrderStatus.IN_PROGRESS.value,
             )
         )).scalar_one()
-
         items.append(ProjectProgressItem(
             project_id=p.id,
             project_name=p.name,
             project_code=p.code,
-            total_units=p.total_units,
-            completion_pct=p.completion_pct,
-            open_remarks=open_remarks_count,
+            total_units=int(metrics["total_units"]),
+            completion_pct=float(metrics["completion_pct"]),
+            open_remarks=int(metrics["open_remarks"]),
             active_work_orders=active_wo_count,
         ))
-        total_pct += p.completion_pct
 
-    avg = total_pct / len(projects) if projects else 0.0
+    avg = sum(float(item.completion_pct) for item in items) / len(items) if items else 0.0
     return {"items": items, "org_avg_completion": round(avg, 2)}
 
 

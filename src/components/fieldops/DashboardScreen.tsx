@@ -160,7 +160,7 @@ const itemVariants = {
   visible: {
     opacity: 1,
     y: 0,
-    transition: { duration: 0.4, ease: 'easeOut' },
+    transition: { duration: 0.4, ease: 'easeOut' as const },
   },
 }
 
@@ -169,7 +169,7 @@ const kpiVariants = {
   visible: {
     opacity: 1,
     scale: 1,
-    transition: { duration: 0.5, ease: 'easeOut' },
+    transition: { duration: 0.5, ease: 'easeOut' as const },
   },
 }
 
@@ -294,7 +294,7 @@ function ProjectProgressBar({ project }: { project: ProjectData }) {
           className={`absolute top-0 right-0 h-full rounded-full ${getCompletionColor(project.completionPct)}`}
           initial={{ width: 0 }}
           animate={{ width: `${project.completionPct}%` }}
-          transition={{ duration: 1, ease: 'easeOut', delay: 0.3 }}
+          transition={{ duration: 1, ease: 'easeOut' as const, delay: 0.3 }}
         />
       </div>
 
@@ -461,7 +461,7 @@ function RemarksBySeverity({ remarks }: { remarks: RemarkData[] }) {
                         className={`h-full rounded-full ${severity === 'CRITICAL' ? 'bg-red-500' : severity === 'MAJOR' ? 'bg-orange-500' : 'bg-amber-500'}`}
                         initial={{ width: 0 }}
                         animate={{ width: `${pct}%` }}
-                        transition={{ duration: 0.8, ease: 'easeOut', delay: 0.2 }}
+                        transition={{ duration: 0.8, ease: 'easeOut' as const, delay: 0.2 }}
                       />
                     </div>
                   </div>
@@ -487,7 +487,7 @@ function RemarksBySeverity({ remarks }: { remarks: RemarkData[] }) {
                         }`}
                         initial={{ width: 0 }}
                         animate={{ width: `${pct}%` }}
-                        transition={{ duration: 0.8, ease: 'easeOut', delay: 0.4 }}
+                        transition={{ duration: 0.8, ease: 'easeOut' as const, delay: 0.4 }}
                       />
                     )
                   })}
@@ -692,7 +692,7 @@ function TradeCompletion({ projects }: { projects: ProjectData[] }) {
                       className={`h-full rounded-full ${getCompletionColor(item.avgPct)}`}
                       initial={{ width: 0 }}
                       animate={{ width: `${item.avgPct}%` }}
-                      transition={{ duration: 0.8, ease: 'easeOut' }}
+                      transition={{ duration: 0.8, ease: 'easeOut' as const }}
                     />
                   </div>
                 </div>

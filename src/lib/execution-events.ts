@@ -28,7 +28,7 @@ export function createProgressIntent(input:{unitId:string|number;boqItemId:strin
   if(!Number.isInteger(input.expectedVersion)||input.expectedVersion<1)throw new Error('expectedVersion must be >= 1')
   if(!Number.isFinite(input.deltaPct)||input.deltaPct===0)throw new Error('deltaPct must be non-zero')
   if(input.rework&&(!input.reason||input.reason.trim().length<20))throw new Error('سبب الإعادة يجب أن يكون 20 حرفاً على الأقل')
-  return{sync_uuid:uuidv4(),entity_type:'BOQ_ITEM',entity_id:String(boqItemId),unit_id,event_class:'PROGRESS',event_type:input.rework?'REWORK':'DELTA_ADD',metric_type:'PERCENTAGE',value:{pct:input.deltaPct},occurred_at:new Date().toISOString(),expected_version:input.expectedVersion,...(input.transactionGroupId?{transaction_group_id:input.transactionGroupId}:{}),...(input.reason?{reason:input.reason.trim()}: {})}
+  return{sync_uuid:uuidv4(),entity_type:'BOQ_ITEM',entity_id:String(boqItemId),unit_id:unitId,event_class:'PROGRESS',event_type:input.rework?'REWORK':'DELTA_ADD',metric_type:'PERCENTAGE',value:{pct:input.deltaPct},occurred_at:new Date().toISOString(),expected_version:input.expectedVersion,...(input.transactionGroupId?{transaction_group_id:input.transactionGroupId}:{}),...(input.reason?{reason:input.reason.trim()}: {})}
 }
 
 export async function submitExecutionEvents(events:ExecutionEventIntent[],transactionGroupId?:string):Promise<ExecutionEventsResponse>{

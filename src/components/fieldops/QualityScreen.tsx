@@ -1188,7 +1188,7 @@ function RemarkDetailView({ remark, onBack, onResolve, onPhotoPreview }: RemarkD
                     {remark.gpsTag.lng as number}
                   </p>
                 </div>
-                {remark.gpsTag.accuracy && (
+                {typeof remark.gpsTag.accuracy === 'number' && (
                   <div>
                     <p className="text-xs text-gray-500">الدقة</p>
                     <p className="font-medium text-gray-900">
