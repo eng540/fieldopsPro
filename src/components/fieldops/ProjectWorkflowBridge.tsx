@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button'
 
 interface Remark { id: string; unitId: string; severity: string; status: string; customIssue?: string | null }
 interface Unit { id: string; name: string; code: string; completionPct: number; boqItems?: { completionPct: number }[] }
-interface Project { id: string; name: string; code: string; completionPct: number; units?: Unit[] }
+interface Project { id: string; name: string; code: string; completionPct: number; executionSummary?: { overallProgressPct?: number; trackedBoqItems?: number } | null; units?: Unit[] }
 
 interface Props {
   project: Project | null
@@ -31,10 +31,11 @@ export function ProjectWorkflowBridge({ project, remarks, onNavigate }: Props) {
     const qualityClosure = projectRemarks.length ? Math.round((resolved.length / projectRemarks.length) * 100) : 100
     const acceptedUnits = units.filter(u => u.completionPct >= 100 && !open.some(r => r.unitId === u.id)).length
     const progressFromBoq = units.flatMap(u => u.boqItems || [])
-    const boqProgress = progressFromBoq.length
+    const boqProgress = Number(project?.executionSummary?.overallProgressPct ?? (progressFromBoq.length
       ? Math.round(progressFromBoq.reduce((s, b) => s + Number(b.completionPct || 0), 0) / progressFromBoq.length)
-      : Number(project?.completionPct || 0)
-    const rollup = Math.round((Number(project?.completionPct || 0) * 0.7) + (boqProgress * 0.3))
+      : Number(project?.completionPct || 0)))
+    const projectProgress = Number(project?.executionSummary?.overallProgressPct ?? project?.completionPct ?? 0)
+    const rollup = Math.round((projectProgress * 0.7) + (boqProgress * 0.3))
     return { open, blocking, resolved, unitsWithBlocking, unitsWithOpen, qualityClosure, acceptedUnits, boqProgress, rollup }
   }, [project, remarks])
 
@@ -57,7 +58,7 @@ export function ProjectWorkflowBridge({ project, remarks, onNavigate }: Props) {
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-            <Metric label="إنجاز المشروع" value={`${project.completionPct}%`} />
+            <Metric label="إنجاز المشروع" value={`${Number(project.executionSummary?.overallProgressPct ?? project.completionPct ?? 0)}%`} />
             <Metric label="إنجاز BOQ" value={`${data.boqProgress}%`} />
             <Metric label="إغلاق الجودة" value={`${data.qualityClosure}%`} />
             <Metric label="Roll-up" value={`${data.rollup}%`} />

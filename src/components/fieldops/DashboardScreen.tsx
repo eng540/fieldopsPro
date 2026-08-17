@@ -20,7 +20,7 @@ import {
 interface ProjectData {
   id: string; orgId: string; name: string; code: string; status: string;
   location: string | null; totalUnits: number; completionPct: number; isActive: boolean;
-  units: UnitData[]; assignments: { user: { id: string; name: string; email: string }; role: { name: string } }[]
+  units: UnitData[]; boqItems?: BoqItemData[]; assignments: { user: { id: string; name: string; email: string }; role: { name: string } }[]; executionSummary?: { overallProgressPct?: number; trackedBoqItems?: number } | null
 }
 
 interface UnitData {
@@ -504,12 +504,12 @@ function RemarksBySeverity({ remarks }: { remarks: RemarkData[] }) {
 function QuickActions({ onNavigate }: { onNavigate: (tab: string) => void }) {
   const actions = [
     { icon: Building2, label: 'المشاريع', tab: 'projects', color: 'bg-emerald-50 text-emerald-600 hover:bg-emerald-100' },
-    { icon: Grid3X3, label: 'إدخال الإنجاز', tab: 'progress', color: 'bg-amber-50 text-amber-600 hover:bg-amber-100' },
-    { icon: Camera, label: 'رفع الصور', tab: 'media', color: 'bg-blue-50 text-blue-600 hover:bg-blue-100' },
+    { icon: Grid3X3, label: 'إدخال الإنجاز', tab: 'speed-entry', color: 'bg-amber-50 text-amber-600 hover:bg-amber-100' },
+    { icon: Camera, label: 'الجودة والصور', tab: 'quality', color: 'bg-blue-50 text-blue-600 hover:bg-blue-100' },
     { icon: AlertTriangle, label: 'الملاحظات', tab: 'quality', color: 'bg-red-50 text-red-600 hover:bg-red-100' },
     { icon: Users, label: 'المستخدمون', tab: 'users', color: 'bg-purple-50 text-purple-600 hover:bg-purple-100' },
-    { icon: FileSpreadsheet, label: 'القواميس', tab: 'dictionaries', color: 'bg-cyan-50 text-cyan-600 hover:bg-cyan-100' },
-    { icon: Activity, label: 'أوامر العمل', tab: 'workorders', color: 'bg-teal-50 text-teal-600 hover:bg-teal-100' },
+    { icon: FileSpreadsheet, label: 'القواميس', tab: 'dictionary', color: 'bg-cyan-50 text-cyan-600 hover:bg-cyan-100' },
+    { icon: Activity, label: 'أوامر العمل', tab: 'work-orders', color: 'bg-teal-50 text-teal-600 hover:bg-teal-100' },
     { icon: Shield, label: 'الحوكمة', tab: 'governance', color: 'bg-indigo-50 text-indigo-600 hover:bg-indigo-100' },
   ]
 

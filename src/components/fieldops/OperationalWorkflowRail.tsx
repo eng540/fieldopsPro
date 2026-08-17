@@ -10,6 +10,7 @@ interface ProjectLike {
   name: string
   code: string
   completionPct: number
+  executionSummary?: { overallProgressPct?: number; trackedBoqItems?: number } | null
   units?: Array<{ id: string; completionPct: number; boqItems?: Array<{ completionPct: number }> }>
 }
 
@@ -38,7 +39,7 @@ export function OperationalWorkflowRail({ project, remarks, online, pendingCount
     const open = scoped.filter(r => OPEN.has(r.status))
     const blocking = open.filter(r => BLOCKING.has(r.severity))
     const boq = (project?.units || []).flatMap(u => u.boqItems || [])
-    const boqProgress = boq.length ? Math.round(boq.reduce((sum, x) => sum + Number(x.completionPct || 0), 0) / boq.length) : Number(project?.completionPct || 0)
+    const boqProgress = Number(project?.executionSummary?.overallProgressPct ?? (boq.length ? Math.round(boq.reduce((sum, x) => sum + Number(x.completionPct || 0), 0) / boq.length) : Number(project?.completionPct || 0)))
     return { open: open.length, blocking: blocking.length, boqProgress }
   }, [project, remarks])
 
