@@ -65,9 +65,150 @@ export function onSyncStatusChange(listener: (status: SyncStatus) => void): () =
 /** Public sync entrypoint used by the offline UI and online recovery handler. */
 export async function processSyncQueue(): Promise<{ processed: number; failed: number; remaining: number; conflicts: any[] }> { if (isSyncing || !onlineStatus) return { processed: 0, failed: 0, remaining: 0, conflicts: [] }; isSyncing = true; syncErrors = []; let processed = 0; let failed = 0; const conflicts: any[] = []; try { const pendingItems = await getPendingSyncItems(); notifySyncListeners(pendingItems.length); if (!pendingItems.length) return { processed: 0, failed: 0, remaining: 0, conflicts: [] }; const operations = pendingItems.map(item => { const payload = JSON.parse(item.payload); return { operation_uuid: item.operationUuid, operation_type: item.operationType, entity_type: _mapEntityType(item.entityType), entity_id: _extractEntityId(payload, item), payload, device_timestamp: new Date(item.createdAt).toISOString() } }); const send = () => fetch(`${API_BASE}/sync/push`, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', ...(getAccessToken() ? { Authorization: `Bearer ${getAccessToken()}` } : {}) }, body: JSON.stringify({ operations }) }); let res = await send(); if (res.status === 401) { await useAuthStore.getState().refreshAccessToken(); res = await send() }; if (res.ok || res.status === 207) { const data = await res.json(); for (const uuid of data.processed || []) { const item = pendingItems.find(i => i.operationUuid === uuid); if (item?.id) { await updateSyncQueueItem(item.id, { status: 'COMPLETED', processedAt: Date.now() }); processed++ } }; for (const conflict of data.conflicts || []) { const item = pendingItems.find(i => i.operationUuid === conflict.operation_uuid); if (item?.id) { await updateSyncQueueItem(item.id, { status: 'CONFLICT', lastError: `${conflict.conflict_type}: ${conflict.resolution_hint}`, serverData: conflict.server_value || null }); failed++ }; conflicts.push(conflict); syncErrors.push(`${conflict.conflict_type}: ${conflict.resolution_hint}`) }; await clearCompletedSyncItems() } else if (res.status === 409) { const data = await res.json(); for (const conflict of data.conflicts || []) { const item = pendingItems.find(i => i.operationUuid === conflict.operation_uuid); if (item?.id) await updateSyncQueueItem(item.id, { status: 'CONFLICT', lastError: `${conflict.conflict_type}: ${conflict.resolution_hint}` }); failed++; conflicts.push(conflict); syncErrors.push(`BLOCKED: ${conflict.resolution_hint}`) } } else { for (const item of pendingItems) await updateSyncQueueItem(item.id!, { status: 'PENDING', retryCount: item.retryCount + 1, lastError: `HTTP ${res.status}` }) } } catch (err) { syncErrors.push(String(err)) } finally { isSyncing = false; notifySyncListeners(await getPendingSyncCount()) }; return { processed, failed, remaining: await getPendingSyncCount(), conflicts } }
 
-export async function fullDataSync(orgId: string): Promise<{ success: boolean; synced: { projects: number; users: number; remarks: number; auditLogs: number; dictionaries: number }; errors: string[] }> { const errors: string[] = []; const synced = { projects: 0, users: 0, remarks: 0, auditLogs: 0, dictionaries: 0 }; if (!onlineStatus) return { success: false, synced, errors: ['OFFLINE'] }; isSyncing = true; notifySyncListeners(0); try { const pull = await apiRequest<any>('/sync/pull', { method: 'POST', body: JSON.stringify({ last_sync_version: null }) }); if (pull.success) { for (const wo of pull.data?.bundle?.work_orders || []) await db.boqProgress.put({ id: `wo-${wo.id}`, orgId: String(wo.org_id), unitId: String(wo.project_id), boqItemId: `wo-${wo.id}`, completionPct: wo.completion_pct, status: wo.status, measuredQuantity: null, reworkFlag: wo.rework_flag, reworkReason: null, reworkAuthorizedBy: null, updatedBy: null, pendingSync: false, lastSyncedAt: Date.now() }); synced.projects = pull.data?.bundle?.work_orders?.length || 0 } else errors.push('sync/pull: ' + (pull.error || 'unknown')); const [users, remarks, audit] = await Promise.all([apiRequest<any>('/auth/users'), apiRequest<any>('/quality/remarks'), apiRequest<any>('/auth/audit?page_size=100')]); if (users.success) synced.users = Array.isArray(users.data) ? users.data.length : users.data?.items?.length || 0; else errors.push('users: ' + (users.error || 'unknown')); if (remarks.success) synced.remarks = Array.isArray(remarks.data) ? remarks.data.length : remarks.data?.items?.length || 0; else errors.push('remarks: ' + (remarks.error || 'unknown')); if (audit.success) synced.auditLogs = Array.isArray(audit.data) ? audit.data.length : Array.isArray(audit.data?.items) ? audit.data.items.length : 0; else errors.push('audit: ' + (audit.error || 'unknown')); await processSyncQueue(); return { success: errors.length === 0, synced, errors } } catch (err) { errors.push(String(err)); return { success: false, synced, errors } } finally { isSyncing = false; notifySyncListeners(await getPendingSyncCount()) } }
+export async function fullDataSync(orgId: string): Promise<{ success: boolean; synced: { projects: number; users: number; remarks: number; auditLogs: number; dictionaries: number }; errors: string[] }> {
+  const errors: string[] = []
+  const synced = { projects: 0, users: 0, remarks: 0, auditLogs: 0, dictionaries: 0 }
+  if (!onlineStatus) return { success: false, synced, errors: ['OFFLINE'] }
+  isSyncing = true
+  notifySyncListeners(0)
+  try {
+    const pull = await apiRequest<any>('/sync/pull', { method: 'POST', body: JSON.stringify({ last_sync_version: null }) })
+    if (pull.success) {
+      // Work orders are not BOQ progress. Keep them out of db.boqProgress;
+      // the online Work Orders screen reads the canonical execution endpoint.
+      const projects = pull.data?.bundle?.projects || pull.data?.bundle?.project_units || []
+      synced.projects = Array.isArray(projects) ? projects.length : 0
+    } else {
+      errors.push('sync/pull: ' + (pull.error || 'unknown'))
+    }
+    const [users, remarks, audit] = await Promise.all([
+      apiRequest<any>('/auth/users'),
+      apiRequest<any>('/quality/remarks'),
+      apiRequest<any>('/auth/audit?page_size=100'),
+    ])
+    if (users.success) synced.users = Array.isArray(users.data) ? users.data.length : users.data?.items?.length || 0
+    else errors.push('users: ' + (users.error || 'unknown'))
+    if (remarks.success) synced.remarks = Array.isArray(remarks.data) ? remarks.data.length : remarks.data?.items?.length || 0
+    else errors.push('remarks: ' + (remarks.error || 'unknown'))
+    if (audit.success) synced.auditLogs = Array.isArray(audit.data) ? audit.data.length : Array.isArray(audit.data?.items) ? audit.data.items.length : 0
+    else errors.push('audit: ' + (audit.error || 'unknown'))
+    await processSyncQueue()
+    return { success: errors.length === 0, synced, errors }
+  } catch (err) {
+    errors.push(String(err))
+    return { success: false, synced, errors }
+  } finally {
+    isSyncing = false
+    notifySyncListeners(await getPendingSyncCount())
+  }
+}
 
-export async function getProjectsHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> { const r = await normalizedHybrid(apiRequest<any>(`/projects?org_id=${encodeURIComponent(orgId)}`)); if (r.success && r.data) { const raw = r.data.projects || r.data.items || r.data; const data = (Array.isArray(raw) ? raw : []).map((project: any) => ({ ...project, id: String(project.id), orgId: String(project.orgId ?? project.org_id ?? ''), totalUnits: Number(project.totalUnits ?? project.total_units ?? 0), completionPct: Number(project.completionPct ?? project.completion_pct ?? 0), isActive: project.isActive !== false, units: (Array.isArray(project.units) ? project.units : []).map((unit: any) => ({ ...unit, id: String(unit.id), projectId: String(unit.projectId ?? unit.project_id ?? project.id), completionPct: Number(unit.completionPct ?? unit.completion_pct ?? 0), boqItems: Array.isArray(unit.boqItems) ? unit.boqItems : [] })), assignments: Array.isArray(project.assignments) ? project.assignments : [] })); return { data, fromCache: false } } return { data: await getLocalProjects(), fromCache: true } }
+function normalizeProjectBoqItem(item: any) {
+  return {
+    ...item,
+    id: String(item.id),
+    projectId: String(item.projectId ?? item.project_id ?? ''),
+    unitOfMeasure: item.unitOfMeasure ?? item.unit_of_measure ?? 'item',
+    completionPct: Number(item.completionPct ?? item.completion_pct ?? 0),
+  }
+}
+
+async function hydrateProjectRuntime(project: any): Promise<any> {
+  const projectId = String(project.id)
+  const [canonicalResult, aggregationResult, stateResult] = await Promise.all([
+    normalizedHybrid(apiRequest<any>(`/projects/${encodeURIComponent(projectId)}/canonical-boq`)),
+    normalizedHybrid(apiRequest<any>(`/execution/aggregation/project/${encodeURIComponent(projectId)}`)),
+    normalizedHybrid(apiRequest<any>(`/execution/state?project_id=${encodeURIComponent(projectId)}&page=1&page_size=500`)),
+  ])
+  const canonical = canonicalResult.success && canonicalResult.data ? canonicalResult.data : {}
+  const aggregation = aggregationResult.success && aggregationResult.data ? aggregationResult.data : {}
+  const states = stateResult.success && stateResult.data ? stateResult.data.items || [] : []
+  const boqItems = (Array.isArray(canonical.boqItems) ? canonical.boqItems : Array.isArray(project.boqItems) ? project.boqItems : []).map(normalizeProjectBoqItem)
+  const boqById = new Map(boqItems.map((item: any) => [String(item.id), item]))
+  const assignments = Array.isArray(canonical.assignments) ? canonical.assignments : []
+  const stateByKey = new Map<string, any>(states.map((state: any) => [
+    `${String(state.unitId)}:${String(state.boqItemId)}`,
+    state,
+  ] as [string, any]))
+  const aggregationUnits = new Map<string, any>((aggregation.units || []).map((unit: any) => [String(unit.unitId), unit] as [string, any]))
+  const baseUnits = Array.isArray(canonical.units) && canonical.units.length ? canonical.units : (Array.isArray(project.units) ? project.units : [])
+  const units = baseUnits.map((unit: any) => {
+    const unitId = String(unit.id)
+    const assignedItems = assignments
+      .filter((assignment: any) => String(assignment.unitId) === unitId && assignment.isActive !== false)
+      .map((assignment: any) => {
+        const item = boqById.get(String(assignment.boqItemId))
+        if (!item) return null
+        const state = stateByKey.get(`${unitId}:${String(assignment.boqItemId)}`)
+        return {
+          ...item,
+          unitId,
+          plannedQty: Number(assignment.plannedQuantity ?? 0),
+          completionPct: Number(state?.completionPct ?? 0),
+          status: state?.status ?? 'NOT_STARTED',
+          stateVersion: Number(state?.stateVersion ?? 1),
+          actualQuantity: state?.actualQuantity ?? null,
+        }
+      })
+      .filter(Boolean)
+    const legacyItems = (Array.isArray(unit.boqItems) ? unit.boqItems : []).map(normalizeProjectBoqItem)
+    const executionUnit = aggregationUnits.get(unitId)
+    const unitItems = assignedItems.length ? assignedItems : legacyItems
+    const completionPct = unitItems.length
+      ? unitItems.reduce((sum: number, item: any) => sum + Number(item.completionPct || 0), 0) / unitItems.length
+      : Number(executionUnit?.completionPct ?? unit.completionPct ?? 0)
+    return {
+      ...unit,
+      id: unitId,
+      projectId: String(unit.projectId ?? unit.project_id ?? projectId),
+      unitType: unit.unitType ?? unit.unit_type ?? '',
+      areaSqm: unit.areaSqm ?? unit.area_sqm ?? null,
+      completionPct: Number(completionPct.toFixed(2)),
+      boqItems: unitItems,
+    }
+  })
+  const overall = Number(aggregation.summary?.overallProgressPct ?? project.completionPct ?? 0)
+  return {
+    ...project,
+    id: projectId,
+    orgId: String(project.orgId ?? project.org_id ?? ''),
+    totalUnits: units.length || Number(project.totalUnits ?? project.total_units ?? 0),
+    completionPct: overall,
+    isActive: project.isActive !== false,
+    units,
+    boqItems,
+    assignments,
+    executionSummary: aggregation.summary || null,
+    executionUnits: aggregation.units || [],
+  }
+}
+
+export async function getProjectsHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> {
+  const r = await normalizedHybrid(apiRequest<any>(`/projects?org_id=${encodeURIComponent(orgId)}`))
+  if (r.success && r.data) {
+    const raw = r.data.projects || r.data.items || r.data
+    const base = (Array.isArray(raw) ? raw : []).map((project: any) => ({
+      ...project,
+      id: String(project.id),
+      orgId: String(project.orgId ?? project.org_id ?? ''),
+      totalUnits: Number(project.totalUnits ?? project.total_units ?? 0),
+      completionPct: Number(project.completionPct ?? project.completion_pct ?? 0),
+      isActive: project.isActive !== false,
+      units: (Array.isArray(project.units) ? project.units : []).map((unit: any) => ({
+        ...unit,
+        id: String(unit.id),
+        projectId: String(unit.projectId ?? unit.project_id ?? project.id),
+        completionPct: Number(unit.completionPct ?? unit.completion_pct ?? 0),
+        boqItems: Array.isArray(unit.boqItems) ? unit.boqItems : [],
+      })),
+      boqItems: Array.isArray(project.boqItems) ? project.boqItems.map(normalizeProjectBoqItem) : [],
+      assignments: Array.isArray(project.assignments) ? project.assignments : [],
+    }))
+    const data = await Promise.all(base.map(hydrateProjectRuntime))
+    return { data, fromCache: false }
+  }
+  return { data: await getLocalProjects(), fromCache: true }
+}
 export async function getRemarksHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> { const r = await normalizedHybrid(apiRequest<any>('/quality/remarks')); if (r.success && r.data) { const raw = Array.isArray(r.data.items) ? r.data.items : Array.isArray(r.data) ? r.data : []; const data = raw.map((remark: any) => ({ ...remark, id: String(remark.id), orgId: String(remark.orgId ?? remark.org_id ?? orgId), unitId: String(remark.unitId ?? remark.unit_id ?? ''), customIssue: remark.customIssue ?? remark.custom_issue ?? null, severity: String(remark.severity ?? 'MINOR'), status: String(remark.status ?? 'OPEN'), photos: Array.isArray(remark.photos) ? remark.photos : [], unit: { id: String(remark.unit?.id ?? remark.unitId ?? remark.unit_id ?? ''), name: String(remark.unit?.name ?? remark.unit_name ?? ''), code: String(remark.unit?.code ?? remark.unit_code ?? '') } })); return { data, fromCache: false } } return { data: await getLocalRemarks(), fromCache: true } }
 export async function getUsersHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> { const r = await normalizedHybrid(apiRequest<any>('/auth/users')); if (r.success && r.data) return { data: Array.isArray(r.data) ? r.data : Array.isArray(r.data.users) ? r.data.users : Array.isArray(r.data.items) ? r.data.items : [], fromCache: false }; return { data: await getLocalUsers(), fromCache: true } }
 export async function getAuditLogsHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> { const r = await normalizedHybrid(apiRequest<any>('/auth/audit?page_size=100')); if (r.success && r.data) return { data: Array.isArray(r.data.items) ? r.data.items : Array.isArray(r.data) ? r.data : [], fromCache: false }; return { data: await getLocalAuditLogs(), fromCache: true } }
