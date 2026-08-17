@@ -1,5 +1,6 @@
 name: Migrate Project Configuration API Transport
 
+# One-time migration/verification workflow for fieldops-v4.
 on:
   push:
     branches:
