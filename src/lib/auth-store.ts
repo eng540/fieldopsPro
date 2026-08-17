@@ -1,7 +1,7 @@
 // FieldOps V4 — Auth State Management (Zustand)
 // Hardened authentication lifecycle for FastAPI /auth/login, /auth/refresh, /auth/logout.
-// The bootstrap lifecycle is explicit: hydration -> refresh -> authenticated/unauthenticated.
-// Every network operation has a finite timeout so the UI can never wait forever on fetch().
+// Bootstrap is explicit: hydration -> refresh -> authenticated/unauthenticated.
+// No network operation is allowed to leave the UI in an indeterminate state.
 
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
@@ -45,8 +45,9 @@ export interface AuthState {
   hasAnyRole: (roles: string[]) => boolean
 }
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || (typeof window !== 'undefined' ? `${window.location.origin}/api/v1` : 'http://localhost:8000/api/v1')
 const REQUEST_TIMEOUT_MS = 10_000
+const HYDRATION_TIMEOUT_MS = 5_000
 
 let refreshInFlight: Promise<void> | null = null
 let refreshTimer: ReturnType<typeof setTimeout> | null = null
@@ -54,8 +55,6 @@ let refreshTimer: ReturnType<typeof setTimeout> | null = null
 function scheduleRefresh(expiresAt: number | undefined) {
   if (typeof window === 'undefined' || !expiresAt) return
   if (refreshTimer) clearTimeout(refreshTimer)
-
-  // Refresh one minute before expiry, with a small safety floor.
   const delay = Math.max(10_000, expiresAt - Date.now() - 60_000)
   refreshTimer = setTimeout(() => {
     useAuthStore.getState().refreshAccessToken().catch(() => undefined)
@@ -95,7 +94,6 @@ export const useAuthStore = create<AuthState>()(
       login: async (email: string, password: string) => {
         set({ isLoading: true, error: null })
         clearRefreshTimer()
-
         try {
           const res = await fetchWithTimeout(`${API_BASE}/auth/login`, {
             method: 'POST',
@@ -104,11 +102,8 @@ export const useAuthStore = create<AuthState>()(
             body: JSON.stringify({ email, password }),
           })
           const data = await parseResponse(res)
-
           if (!res.ok) throw new Error(data.detail || `فشل تسجيل الدخول (${res.status})`)
-          if (!data.access_token || !data.session_id || !data.user) {
-            throw new Error('استجابة المصادقة غير مكتملة من الخادم')
-          }
+          if (!data.access_token || !data.session_id || !data.user) throw new Error('استجابة المصادقة غير مكتملة من الخادم')
 
           const user: AuthUser = {
             id: String(data.user.id),
@@ -119,29 +114,15 @@ export const useAuthStore = create<AuthState>()(
             roles: data.user.assignments?.map((a: any) => a.role?.name).filter(Boolean) || [],
             assignments: data.user.assignments?.map((a: any) => ({
               projectId: String(a.project_id),
-              project: {
-                id: String(a.project_id),
-                name: a.project?.name || '',
-                code: a.project?.code || '',
-              },
+              project: { id: String(a.project_id), name: a.project?.name || '', code: a.project?.code || '' },
               role: { id: String(a.role_id), name: a.role?.name || '' },
             })) || [],
           }
-
           const expiresAt = Date.now() + ((data.expires_in || 900) * 1000)
-          const tokens: AuthTokens = {
-            accessToken: data.access_token,
-            refreshToken: data.refresh_token || '',
-            sessionId: data.session_id,
-            expiresAt,
-          }
-
-          set({ user, tokens, isAuthenticated: true, isLoading: false, isInitializing: false, error: null })
+          set({ user, tokens: { accessToken: data.access_token, refreshToken: data.refresh_token || '', sessionId: data.session_id, expiresAt }, isAuthenticated: true, isLoading: false, isInitializing: false, error: null })
           scheduleRefresh(expiresAt)
         } catch (err: any) {
-          const message = err?.name === 'AbortError'
-            ? 'انتهت مهلة الاتصال بخادم المصادقة'
-            : (err?.message || 'حدث خطأ أثناء تسجيل الدخول')
+          const message = err?.name === 'AbortError' ? 'انتهت مهلة الاتصال بخادم المصادقة' : (err?.message || 'حدث خطأ أثناء تسجيل الدخول')
           set({ isLoading: false, isInitializing: false, error: message, isAuthenticated: false })
           throw new Error(message)
         }
@@ -150,18 +131,9 @@ export const useAuthStore = create<AuthState>()(
       logout: async (remote = true) => {
         const { tokens } = get()
         clearRefreshTimer()
-
         try {
           if (remote && tokens?.accessToken) {
-            await fetchWithTimeout(`${API_BASE}/auth/logout`, {
-              method: 'POST',
-              credentials: 'include',
-              headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${tokens.accessToken}`,
-              },
-              body: JSON.stringify({ session_id: tokens.sessionId, revoke_all: false }),
-            }).catch(() => undefined)
+            await fetchWithTimeout(`${API_BASE}/auth/logout`, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${tokens.accessToken}` }, body: JSON.stringify({ session_id: tokens.sessionId, revoke_all: false }) }).catch(() => undefined)
           }
         } finally {
           set({ user: null, tokens: null, isAuthenticated: false, isLoading: false, isInitializing: false, error: null })
@@ -170,67 +142,48 @@ export const useAuthStore = create<AuthState>()(
 
       refreshAccessToken: async () => {
         if (refreshInFlight) return refreshInFlight
-
         const current = get().tokens
         if (!current?.refreshToken && !current?.sessionId) {
           await get().logout(false)
           throw new Error('لا توجد جلسة تحديث صالحة')
         }
-
         refreshInFlight = (async () => {
           try {
-            const res = await fetchWithTimeout(`${API_BASE}/auth/refresh`, {
-              method: 'POST',
-              credentials: 'include',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(current.refreshToken ? { refresh_token: current.refreshToken } : {}),
-            })
+            const res = await fetchWithTimeout(`${API_BASE}/auth/refresh`, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(current.refreshToken ? { refresh_token: current.refreshToken } : {}) })
             const data = await parseResponse(res)
-
-            if (!res.ok || !data.access_token) {
-              throw new Error(data.detail || `فشل تحديث الجلسة (${res.status})`)
-            }
-
+            if (!res.ok || !data.access_token) throw new Error(data.detail || `فشل تحديث الجلسة (${res.status})`)
             const expiresAt = Date.now() + ((data.expires_in || 900) * 1000)
-            set({
-              tokens: {
-                ...get().tokens!,
-                accessToken: data.access_token,
-                refreshToken: data.refresh_token || get().tokens!.refreshToken,
-                expiresAt,
-              },
-              isAuthenticated: true,
-              isInitializing: false,
-              error: null,
-            })
+            const latest = get().tokens
+            set({ tokens: { ...(latest || current), accessToken: data.access_token, refreshToken: data.refresh_token || latest?.refreshToken || current.refreshToken, expiresAt }, isAuthenticated: true, isInitializing: false, error: null })
             scheduleRefresh(expiresAt)
           } catch (err: any) {
+            const message = err?.name === 'AbortError' ? 'انتهت مهلة تحديث الجلسة' : (err?.message || 'فشل تحديث الجلسة')
             await get().logout(false)
-            throw new Error(err?.name === 'AbortError' ? 'انتهت مهلة تحديث الجلسة' : (err?.message || 'فشل تحديث الجلسة'))
+            set({ isInitializing: false, isAuthenticated: false, error: message })
+            throw new Error(message)
           } finally {
             refreshInFlight = null
           }
         })()
-
         return refreshInFlight
       },
 
       bootstrapAuth: async () => {
         if (!get().isHydrated) return
-
-        const { tokens, isAuthenticated } = get()
+        const { tokens } = get()
         if (!tokens?.sessionId && !tokens?.refreshToken) {
           set({ isInitializing: false, isAuthenticated: false, error: null })
           return
         }
-
         set({ isInitializing: true, error: null })
         try {
-          await get().refreshAccessToken()
+          await Promise.race([get().refreshAccessToken(), new Promise<never>((_, reject) => setTimeout(() => reject(new Error('انتهت مهلة تهيئة الجلسة')), REQUEST_TIMEOUT_MS + 2_000))])
           set({ isAuthenticated: true, isInitializing: false, error: null })
         } catch (err: any) {
-          console.warn('[FieldOps Auth] bootstrap failed; session cleared', err?.message || err)
-          set({ isAuthenticated: false, isInitializing: false, error: null })
+          const message = err?.message || 'تعذر استعادة جلسة المصادقة'
+          console.warn('[FieldOps Auth] bootstrap failed:', message)
+          await get().logout(false)
+          set({ isAuthenticated: false, isInitializing: false, error: message })
         }
       },
 
@@ -241,25 +194,28 @@ export const useAuthStore = create<AuthState>()(
     }),
     {
       name: 'fieldops-auth',
-      partialize: (state) => ({
-        user: state.user,
-        tokens: state.tokens,
-        isAuthenticated: state.isAuthenticated,
-      }),
+      partialize: (state) => ({ user: state.user, tokens: state.tokens, isAuthenticated: state.isAuthenticated }),
       onRehydrateStorage: () => (state, error) => {
-        // Zustand persist hydration is a first-class bootstrap phase. Never leave
-        // the application waiting on an implicit `loading=true` state.
         if (error) {
           console.error('[FieldOps Auth] hydration failed', error)
           useAuthStore.setState({ isHydrated: true, isInitializing: false, isAuthenticated: false, error: 'تعذر استعادة جلسة المصادقة' })
           return
         }
-
         useAuthStore.setState({ isHydrated: true, isInitializing: false })
-        if (state?.isAuthenticated && state.tokens?.expiresAt) {
-          scheduleRefresh(state.tokens.expiresAt)
-        }
+        if (state?.isAuthenticated && state.tokens?.expiresAt) scheduleRefresh(state.tokens.expiresAt)
       },
     }
   )
 )
+
+// Last-resort safety net: storage adapters, browser privacy modes, or a broken
+// persisted payload must never leave the application on an infinite spinner.
+if (typeof window !== 'undefined') {
+  window.setTimeout(() => {
+    const state = useAuthStore.getState()
+    if (!state.isHydrated) {
+      console.error('[FieldOps Auth] hydration watchdog expired')
+      useAuthStore.setState({ isHydrated: true, isInitializing: false, isAuthenticated: false, error: 'انتهت مهلة تهيئة التخزين المحلي للجلسة' })
+    }
+  }, HYDRATION_TIMEOUT_MS)
+}
