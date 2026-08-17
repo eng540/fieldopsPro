@@ -18,6 +18,7 @@ pydantic-settings = "^2.2"
 python-jose = {extras = ["cryptography"], version = "^3.3"}
 bcrypt = ">=3.2.0"
 python-multipart = "^0.0.9"
+openpyxl = "^3.1.5"
 aioboto3 = "^13.0"
 redis = "^5.0"
 httpx = "^0.27"
@@ -58,10 +59,10 @@ convention = "google"
 asyncio_mode = "auto"
 testpaths = ["tests"]
 python_files = ["test_*.py", "*_test.py"]
-python_classes = ["Test*"]
-python_functions = ["test_*"]
+python_classes = ["Test*", "*Test"]
+python_functions = ["test_*", "*_test"]
 addopts = "-x --tb=short --strict-markers"
-markers = ["unit: Unit tests", "integration: Integration tests", "e2e: End-to-end tests", "slow: Slow tests"]
+markers = ["unit: unit tests", "integration: integration tests", "e2e: end-to-end tests", "slow: slow tests"]
 
 [tool.mypy]
 python_version = "3.12"
