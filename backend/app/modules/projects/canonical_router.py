@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.modules.execution.service import initialize_boq_state
 from app.modules.projects.models import BOQItem, Project, ProjectUnit, UnitBoQAssignment
+from app.modules.projects.schemas import BOQItemRead
 from app.modules.iam.dependencies import get_current_user
 
 router = APIRouter()
@@ -49,31 +50,28 @@ async def canonical_boq(project_id: int, db: AsyncSession = Depends(get_db), cur
     project = (await db.execute(select(Project).where(Project.id == project_id, Project.org_id == org_id))).scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    boq = list((await db.execute(
-        select(BOQItem).where(BOQItem.project_id == project_id, BOQItem.org_id == org_id, BOQItem.is_active.is_(True)).order_by(BOQItem.sequence, BOQItem.code)
-    )).scalars().all())
-    units = list((await db.execute(
-        select(ProjectUnit).where(ProjectUnit.project_id == project_id, ProjectUnit.org_id == org_id, ProjectUnit.is_active.is_(True)).order_by(ProjectUnit.code, ProjectUnit.id)
-    )).scalars().all())
-    assignments = list((await db.execute(
-        select(UnitBoQAssignment).join(BOQItem, BOQItem.id == UnitBoQAssignment.boq_item_id).where(
-            BOQItem.project_id == project_id, UnitBoQAssignment.org_id == org_id, UnitBoQAssignment.is_active.is_(True)
-        ).order_by(UnitBoQAssignment.unit_id, UnitBoQAssignment.boq_item_id)
-    )).scalars().all())
+    boq = list((await db.execute(select(BOQItem).where(
+        BOQItem.project_id == project_id, BOQItem.org_id == org_id, BOQItem.is_active.is_(True)
+    ).order_by(BOQItem.sequence, BOQItem.code))).scalars().all())
+    units = list((await db.execute(select(ProjectUnit).where(
+        ProjectUnit.project_id == project_id, ProjectUnit.org_id == org_id, ProjectUnit.is_active.is_(True)
+    ).order_by(ProjectUnit.code, ProjectUnit.id))).scalars().all())
+    assignments = list((await db.execute(select(UnitBoQAssignment).join(BOQItem, BOQItem.id == UnitBoQAssignment.boq_item_id).where(
+        BOQItem.project_id == project_id, UnitBoQAssignment.org_id == org_id, UnitBoQAssignment.is_active.is_(True)
+    ).order_by(UnitBoQAssignment.unit_id, UnitBoQAssignment.boq_item_id))).scalars().all())
     return {
         "project_id": project_id,
         "boq_items": boq,
         "units": units,
-        "assignments": [
-            {"id": a.id, "org_id": a.org_id, "unit_id": a.unit_id, "boq_item_id": a.boq_item_id,
-             "planned_quantity": a.planned_quantity, "is_active": a.is_active,
-             "extra_data": a.extra_data, "created_at": a.created_at, "updated_at": a.updated_at}
-            for a in assignments
-        ],
+        "assignments": [{
+            "id": a.id, "org_id": a.org_id, "unit_id": a.unit_id, "boq_item_id": a.boq_item_id,
+            "planned_quantity": a.planned_quantity, "is_active": a.is_active,
+            "extra_data": a.extra_data, "created_at": a.created_at, "updated_at": a.updated_at,
+        } for a in assignments],
     }
 
 
-@router.post("/{project_id}/canonical-boq", status_code=201)
+@router.post("/{project_id}/canonical-boq", response_model=BOQItemRead, status_code=201)
 async def create_canonical_boq(project_id: int, data: CanonicalBOQCreate, db: AsyncSession = Depends(get_db), current_user: dict = Depends(get_current_user)) -> BOQItem:
     org_id = current_user["org_id"]
     project = (await db.execute(select(Project).where(Project.id == project_id, Project.org_id == org_id))).scalar_one_or_none()
@@ -116,7 +114,6 @@ async def apply_canonical_boq(project_id: int, boq_item_id: int, data: ApplyBOQR
     ))).scalars().all())
     if len(units) != len(unit_ids):
         raise HTTPException(status_code=400, detail="One or more selected units are not in this project")
-
     created = updated = 0
     for unit in units:
         assignment = (await db.execute(select(UnitBoQAssignment).where(
@@ -132,7 +129,6 @@ async def apply_canonical_boq(project_id: int, boq_item_id: int, data: ApplyBOQR
             updated += 1
         await db.flush()
         await initialize_boq_state(db, org_id=org_id, unit_id=unit.id, boq_item_id=item.id, user_id=user_id)
-
     await db.flush()
     return {"project_id": project_id, "boq_item_id": boq_item_id, "created": created, "updated": updated, "total": created + updated}
 
@@ -140,13 +136,10 @@ async def apply_canonical_boq(project_id: int, boq_item_id: int, data: ApplyBOQR
 @router.post("/{project_id}/canonical-boq/{boq_item_id}/unapply", status_code=200)
 async def unapply_canonical_boq(project_id: int, boq_item_id: int, data: ApplyBOQRequest, db: AsyncSession = Depends(get_db), current_user: dict = Depends(get_current_user)) -> dict[str, Any]:
     org_id = current_user["org_id"]
-    rows = list((await db.execute(
-        select(UnitBoQAssignment).join(BOQItem, BOQItem.id == UnitBoQAssignment.boq_item_id).where(
-            BOQItem.id == boq_item_id, BOQItem.project_id == project_id, UnitBoQAssignment.org_id == org_id,
-            UnitBoQAssignment.unit_id.in_(list(dict.fromkeys(data.unit_ids)))
-        )
-    )).scalars().all())
-    for row in rows:
-        row.is_active = False
+    rows = list((await db.execute(select(UnitBoQAssignment).join(BOQItem, BOQItem.id == UnitBoQAssignment.boq_item_id).where(
+        BOQItem.id == boq_item_id, BOQItem.project_id == project_id, UnitBoQAssignment.org_id == org_id,
+        UnitBoQAssignment.unit_id.in_(list(dict.fromkeys(data.unit_ids)))
+    ))).scalars().all())
+    for row in rows: row.is_active = False
     await db.flush()
     return {"project_id": project_id, "boq_item_id": boq_item_id, "deactivated": len(rows)}
