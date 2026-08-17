@@ -1,10 +1,10 @@
 // FieldOps V4 — Service Worker
 // Deployment-safe offline support.
-// IMPORTANT: Next.js HTML/chunks are never cached. This prevents an old
-// deployment from being combined with a new deployment and causing
-// ChunkLoadError / "This page couldn't load" failures after release.
+// Next.js HTML/chunks are never cached. This prevents an old deployment
+// from being combined with a new deployment and causing ChunkLoadError or
+// stale-runtime failures after release.
 
-const CACHE_NAME = 'fieldops-v4-runtime-v3'
+const CACHE_NAME = 'fieldops-v4-runtime-v4'
 const LEGACY_CACHE_PREFIX = 'fieldops-v4-'
 const STATIC_ASSETS = ['/logo.svg']
 
@@ -33,12 +33,9 @@ self.addEventListener('fetch', (event) => {
 
   if (request.method !== 'GET') return
   if (url.origin !== self.location.origin) return
-
-  // Never cache the service worker itself.
   if (url.pathname === '/sw.js') return
 
-  // Never cache Next.js HTML or build-specific chunks. A deployment may change
-  // these URLs atomically, and serving a stale document/chunk pair is unsafe.
+  // Never cache Next.js documents or build-specific chunks.
   if (url.pathname.startsWith('/_next/')) {
     event.respondWith(fetch(request))
     return
@@ -65,13 +62,13 @@ self.addEventListener('fetch', (event) => {
     return
   }
 
-  // Do not cache navigations. Always load the current deployment HTML.
+  // Never cache navigations. Always load current deployment HTML.
   if (request.mode === 'navigate') {
     event.respondWith(fetch(request))
     return
   }
 
-  // Only small, deployment-independent assets use the cache.
+  // Only small deployment-independent assets use the cache.
   if (url.pathname.endsWith('.svg') || url.pathname.endsWith('.png') || url.pathname.endsWith('.ico') || url.pathname.endsWith('.woff2')) {
     event.respondWith(
       caches.match(request).then((cached) => {
