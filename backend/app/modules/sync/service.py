@@ -36,6 +36,7 @@ from app.modules.execution.models import (
     SyncStatus,
 )
 from app.modules.quality.models import Remark, RemarkStatus
+from app.modules.projects.models import UnitBoQAssignment
 from app.modules.sync.schemas import (
     SyncBundle,
     SyncConflict,
@@ -474,12 +475,31 @@ async def _process_unit_progress(
     progress = result.scalar_one_or_none()
 
     if not progress:
-        # If CREATE operation, create a new progress record
+        # If CREATE operation, create a new progress record only after
+        # configuration proves that the BOQ item applies to the unit.
         if op.operation_type.value == "CREATE":
+            resolved_unit_id = unit_id or payload.get("unit_id", 0)
+            resolved_boq_item_id = boq_item_id or payload.get("boq_item_id", 0)
+            assignment_result = await db.execute(select(UnitBoQAssignment.id).where(
+                UnitBoQAssignment.org_id == org_id,
+                UnitBoQAssignment.unit_id == resolved_unit_id,
+                UnitBoQAssignment.boq_item_id == resolved_boq_item_id,
+                UnitBoQAssignment.is_active.is_(True),
+            ))
+            if assignment_result.scalar_one_or_none() is None:
+                conflicts.append(SyncConflict(
+                    operation_uuid=uuid,
+                    conflict_type=SyncConflictType.POLICY_BLOCK,
+                    server_value={},
+                    client_value={"unit_id": resolved_unit_id, "boq_item_id": resolved_boq_item_id},
+                    resolution_hint="Apply the BOQ item to the unit before syncing execution progress.",
+                ))
+                await _register_sync_log(db, uuid, op, org_id, user_id, SyncStatus.FAILED, 0)
+                return {"success": False, "conflicts": conflicts}
             new_progress = UnitBoQProgress(
                 org_id=org_id,
-                unit_id=unit_id or payload.get("unit_id", 0),
-                boq_item_id=boq_item_id or payload.get("boq_item_id", 0),
+                unit_id=resolved_unit_id,
+                boq_item_id=resolved_boq_item_id,
                 completion_pct=payload.get("completion_pct", 0.0),
                 status=payload.get("status", "NOT_STARTED"),
                 measured_quantity=payload.get("measured_quantity"),

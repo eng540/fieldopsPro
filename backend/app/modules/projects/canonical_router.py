@@ -27,6 +27,50 @@ from app.modules.iam.dependencies import get_current_user
 router = APIRouter()
 
 
+def _iso(value: Any) -> str | None:
+    return value.isoformat() if value is not None and hasattr(value, "isoformat") else value
+
+
+def _serialize_boq(item: BOQItem) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "org_id": item.org_id,
+        "project_id": item.project_id,
+        "code": item.code,
+        "category": item.category,
+        "trade": item.trade,
+        "description": item.description,
+        "quantity": item.quantity,
+        "rate": item.rate,
+        "amount": item.amount,
+        "unit_of_measure": item.unit_of_measure,
+        "sequence": item.sequence,
+        "completion_pct": item.completion_pct,
+        "is_active": item.is_active,
+        "extra_data": item.extra_data,
+        "created_at": _iso(item.created_at),
+        "updated_at": _iso(item.updated_at),
+    }
+
+
+def _serialize_unit(unit: ProjectUnit) -> dict[str, Any]:
+    return {
+        "id": unit.id,
+        "org_id": unit.org_id,
+        "project_id": unit.project_id,
+        "name": unit.name,
+        "code": unit.code,
+        "unit_type": unit.unit_type,
+        "floor": unit.floor,
+        "area_sqm": unit.area_sqm,
+        "status": unit.status,
+        "completion_pct": unit.completion_pct,
+        "is_active": unit.is_active,
+        "created_at": _iso(unit.created_at),
+        "updated_at": _iso(unit.updated_at),
+    }
+
+
 class CanonicalBOQCreate(BaseModel):
     code: str | None = Field(default=None, max_length=80)
     category: str | None = Field(default=None, max_length=120)
@@ -61,12 +105,12 @@ async def canonical_boq(project_id: int, db: AsyncSession = Depends(get_db), cur
     ).order_by(UnitBoQAssignment.unit_id, UnitBoQAssignment.boq_item_id))).scalars().all())
     return {
         "project_id": project_id,
-        "boq_items": boq,
-        "units": units,
+        "boq_items": [_serialize_boq(item) for item in boq],
+        "units": [_serialize_unit(unit) for unit in units],
         "assignments": [{
             "id": a.id, "org_id": a.org_id, "unit_id": a.unit_id, "boq_item_id": a.boq_item_id,
             "planned_quantity": a.planned_quantity, "is_active": a.is_active,
-            "extra_data": a.extra_data, "created_at": a.created_at, "updated_at": a.updated_at,
+            "extra_data": a.extra_data, "created_at": _iso(a.created_at), "updated_at": _iso(a.updated_at),
         } for a in assignments],
     }
 

@@ -88,6 +88,16 @@ def _validate_status_transition(current: str, requested: str) -> str:
 
 
 async def initialize_boq_state(db: AsyncSession, *, org_id: int, unit_id: int, boq_item_id: int, user_id: int) -> UnitBoQProgress:
+    assignment = await db.execute(select(UnitBoQAssignment.id).where(
+        UnitBoQAssignment.org_id == org_id,
+        UnitBoQAssignment.unit_id == unit_id,
+        UnitBoQAssignment.boq_item_id == boq_item_id,
+        UnitBoQAssignment.is_active.is_(True),
+    ))
+    if assignment.scalar_one_or_none() is None:
+        raise BusinessRuleError(
+            f"BOQ item {boq_item_id} is not assigned to unit {unit_id}; apply the BOQ item before initializing execution state."
+        )
     existing = await db.execute(select(UnitBoQProgress).where(UnitBoQProgress.org_id == org_id, UnitBoQProgress.unit_id == unit_id, UnitBoQProgress.boq_item_id == boq_item_id).with_for_update())
     state = existing.scalar_one_or_none()
     if state is not None:
@@ -178,6 +188,16 @@ async def process_event_intent(db: AsyncSession, intent: EventIntent, org_id: in
     current_state = state_result.scalar_one_or_none()
     if current_state is None:
         raise BusinessRuleError(f"BOQ state not found for unit {intent.unit_id}, item {boq_item_id}.")
+    assignment_result = await db.execute(select(UnitBoQAssignment.id).where(
+        UnitBoQAssignment.org_id == org_id,
+        UnitBoQAssignment.unit_id == intent.unit_id,
+        UnitBoQAssignment.boq_item_id == boq_item_id,
+        UnitBoQAssignment.is_active.is_(True),
+    ))
+    if assignment_result.scalar_one_or_none() is None:
+        raise BusinessRuleError(
+            f"BOQ item {boq_item_id} is not assigned to unit {intent.unit_id}; execution update is blocked."
+        )
     if current_state.state_version != intent.expected_version:
         raise ConcurrentModificationError(EventConflictDetails(sync_uuid=intent.sync_uuid, expected_version=intent.expected_version, actual_version=current_state.state_version, current_state={"unit_id": current_state.unit_id, "boq_item_id": current_state.boq_item_id, "completion_pct": current_state.completion_pct, "actual_quantity": current_state.actual_quantity, "status": current_state.status, "state_version": current_state.state_version, "last_event_id": current_state.last_event_id, "updated_by": current_state.updated_by, "updated_at": current_state.updated_at.isoformat()}))
     previous_value = {"pct": current_state.completion_pct, "qty": current_state.actual_quantity, "status": current_state.status}

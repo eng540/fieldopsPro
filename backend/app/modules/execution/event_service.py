@@ -21,6 +21,7 @@ from app.modules.execution.models import (
     EventClass, EventSyncLog, EventType, ExecutionEvent, MetricType,
     UnitBoQProgress, UnitBoQProgressStatus,
 )
+from app.modules.projects.models import UnitBoQAssignment
 
 _REWORK_ROLES = {"PROJECT_MANAGER", "ORG_ADMIN", "SUPER_ADMIN"}
 _CORRECTION_ROLES = {"ORG_ADMIN", "SUPER_ADMIN"}
@@ -82,6 +83,17 @@ async def apply_event(
         raise HTTPException(
             status_code=409,
             detail="BOQ materialized state is not initialized. Use the controlled initialization/migration pipeline.",
+        )
+    assignment_result = await db.execute(select(UnitBoQAssignment.id).where(
+        UnitBoQAssignment.org_id == org_id,
+        UnitBoQAssignment.unit_id == unit_id,
+        UnitBoQAssignment.boq_item_id == boq_item_id,
+        UnitBoQAssignment.is_active.is_(True),
+    ))
+    if assignment_result.scalar_one_or_none() is None:
+        raise HTTPException(
+            status_code=409,
+            detail="BOQ item is not assigned to this unit. Apply the item in Project Configuration before entering progress.",
         )
 
     actual_version = state.state_version
