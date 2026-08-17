@@ -8,7 +8,7 @@ unit, quantity, or progress value.
 """
 from alembic import op
 
-revision = "sprint11_reconcile_boq_assignments_001"
+revision = "s11_boq_assign_reconcile"
 down_revision = "sprint10_repair_legacy_boq_001"
 branch_labels = None
 depends_on = None
