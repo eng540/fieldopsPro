@@ -12,8 +12,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { ArrowRight, BookOpen, Boxes, FileText, Loader2, Plus, RefreshCw, Users } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
 import { useAuthStore } from "@/lib/auth-store"
+import { apiRequest } from "@/lib/api-client"
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1"
 const DEFAULT_UNIT_TYPES = ["Shelter", "House", "Classroom", "Office", "Other"]
 const DEFAULT_TRADES = ["Civil", "Electrical", "Plumbing", "Steel", "Finishes", "Other"]
 const DEFAULT_UOMS = ["m", "m²", "m³", "No", "kg", "LS"]
@@ -24,20 +24,14 @@ type Boq = { id: string; code: string; trade: string; description: string; quant
 type Assignment = { id: number; unit_id: number; boq_item_id: number; planned_quantity: number; is_active: boolean }
 
 async function api<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
-  const send = () => fetch(`${API_BASE}${endpoint}`, {
-    ...options,
-    credentials: "include",
-    headers: {
-      "Content-Type": "application/json",
-      ...(useAuthStore.getState().tokens?.accessToken ? { Authorization: `Bearer ${useAuthStore.getState().tokens!.accessToken}` } : {}),
-      ...(options.headers || {}),
-    },
-  })
-  let res = await send()
-  if (res.status === 401) { await useAuthStore.getState().refreshAccessToken(); res = await send() }
-  const data = await res.json().catch(() => ({}))
-  if (!res.ok) throw new Error(data.detail || data.error || `HTTP ${res.status}`)
-  return data as T
+  const result = await apiRequest<T>(endpoint, options)
+  if (!result.success) {
+    if (result.error === "UNAUTHORIZED") {
+      throw new Error("SESSION_EXPIRED")
+    }
+    throw new Error(result.error || "API_REQUEST_FAILED")
+  }
+  return result.data as T
 }
 
 export default function ProjectConfigurationPage() {
@@ -88,7 +82,7 @@ export default function ProjectConfigurationPage() {
       setUnits((canonical.units || unitResponse.items || []).map((u: any) => ({ ...u, id: String(u.id), unitType: u.unitType ?? u.unit_type ?? "", floor: u.floor ?? null, areaSqm: u.areaSqm ?? u.area_sqm ?? null })))
       setBoq((canonical.boq_items || []).map((b: any) => ({ ...b, id: String(b.id), unitOfMeasure: b.unitOfMeasure ?? b.unit_of_measure ?? "item", completionPct: Number(b.completionPct ?? b.completion_pct ?? 0) })))
       setAssignments(canonical.assignments || [])
-    } catch (e) { toast({ title: "تعذر تحميل إعدادات المشروع", description: e instanceof Error ? e.message : "خطأ غير متوقع", variant: "destructive" }) }
+    } catch (e) { toast({ title: "تعذر تحميل إعدادات المشروع", description: e instanceof Error && e.message === "SESSION_EXPIRED" ? "انتهت جلسة الدخول، يرجى تسجيل الدخول مرة أخرى" : e instanceof Error ? e.message : "خطأ غير متوقع", variant: "destructive" }) }
     finally { setLoading(false) }
   }
   useEffect(() => { load() }, [orgId, projectId])
@@ -100,10 +94,10 @@ export default function ProjectConfigurationPage() {
   const selectedBoq = boq.find(b => String(b.id) === selectedBoqId)
   const filteredUnits = units.filter(u => `${u.name} ${u.code}`.toLowerCase().includes(unitSearch.trim().toLowerCase()))
 
-  const addDictionary = async () => { if (!dictValue.trim()) return; setSaving(true); try { await api("/projects/dictionaries", { method: "POST", body: JSON.stringify({ project_id: Number(projectId), kind: dictKind.trim().toLowerCase(), key: dictKey.trim() || dictValue.trim(), value: dictValue.trim(), sort_order: 0 }) }); setDictKey(""); setDictValue(""); await load(); toast({ title: "تمت إضافة القيمة إلى القاموس" }) } catch (e) { toast({ title: "فشل إضافة القاموس", description: e instanceof Error ? e.message : "خطأ", variant: "destructive" }) } finally { setSaving(false) } }
-  const addUnit = async () => { if (!unitName.trim() || !unitCode.trim() || !unitType.trim()) return; setSaving(true); try { await api(`/projects/${projectId}/units`, { method: "POST", body: JSON.stringify({ name: unitName.trim(), code: unitCode.trim(), unit_type: unitType.trim(), floor: unitFloor.trim() || null, area_sqm: unitArea ? Number(unitArea) : null }) }); setUnitName(""); setUnitCode(""); setUnitFloor(""); setUnitArea(""); await load(); toast({ title: "تمت إضافة الوحدة" }) } catch (e) { toast({ title: "فشل إنشاء الوحدة", description: e instanceof Error ? e.message : "خطأ", variant: "destructive" }) } finally { setSaving(false) } }
-  const addBoq = async () => { if (!trade.trim() || !description.trim() || !uom.trim() || !quantity) return; setSaving(true); try { const item = await api<Boq>(`/projects/${projectId}/canonical-boq`, { method: "POST", body: JSON.stringify({ code: boqCode.trim() || null, trade: trade.trim(), description: description.trim(), quantity: Number(quantity), rate: 0, unit_of_measure: uom.trim() }) }); setBoqCode(""); setDescription(""); setQuantity(""); await load(); setSelectedBoqId(String(item.id)); toast({ title: "تم إنشاء بند BOQ مركزي", description: "البند تعريف واحد للمشروع، وليس نسخة لكل وحدة." }) } catch (e) { toast({ title: "فشل إنشاء بند BOQ", description: e instanceof Error ? e.message : "خطأ", variant: "destructive" }) } finally { setSaving(false) } }
-  const applyBoq = async () => { if (!selectedBoqId || selectedUnitIds.size === 0) return; setSaving(true); try { await api(`/projects/${projectId}/canonical-boq/${selectedBoqId}/apply`, { method: "POST", body: JSON.stringify({ unit_ids: Array.from(selectedUnitIds), planned_quantity: plannedPerUnit ? Number(plannedPerUnit) : 0 }) }); setSelectedUnitIds(new Set()); await load(); toast({ title: "تم تطبيق البند على الوحدات", description: "تم إنشاء علاقة التطبيق وتهيئة حالة التنفيذ." }) } catch (e) { toast({ title: "فشل تطبيق البند", description: e instanceof Error ? e.message : "خطأ", variant: "destructive" }) } finally { setSaving(false) } }
+  const addDictionary = async () => { if (!dictValue.trim()) return; setSaving(true); try { await api("/projects/dictionaries", { method: "POST", body: JSON.stringify({ project_id: Number(projectId), kind: dictKind.trim().toLowerCase(), key: dictKey.trim() || dictValue.trim(), value: dictValue.trim(), sort_order: 0 }) }); setDictKey(""); setDictValue(""); await load(); toast({ title: "تمت إضافة القيمة إلى القاموس" }) } catch (e) { toast({ title: "فشل إضافة القاموس", description: e instanceof Error && e.message === "SESSION_EXPIRED" ? "انتهت جلسة الدخول، يرجى تسجيل الدخول مرة أخرى" : e instanceof Error ? e.message : "خطأ", variant: "destructive" }) } finally { setSaving(false) } }
+  const addUnit = async () => { if (!unitName.trim() || !unitCode.trim() || !unitType.trim()) return; setSaving(true); try { await api(`/projects/${projectId}/units`, { method: "POST", body: JSON.stringify({ name: unitName.trim(), code: unitCode.trim(), unit_type: unitType.trim(), floor: unitFloor.trim() || null, area_sqm: unitArea ? Number(unitArea) : null }) }); setUnitName(""); setUnitCode(""); setUnitFloor(""); setUnitArea(""); await load(); toast({ title: "تمت إضافة الوحدة" }) } catch (e) { toast({ title: "فشل إنشاء الوحدة", description: e instanceof Error && e.message === "SESSION_EXPIRED" ? "انتهت جلسة الدخول، يرجى تسجيل الدخول مرة أخرى" : e instanceof Error ? e.message : "خطأ", variant: "destructive" }) } finally { setSaving(false) } }
+  const addBoq = async () => { if (!trade.trim() || !description.trim() || !uom.trim() || !quantity) return; setSaving(true); try { const item = await api<Boq>(`/projects/${projectId}/canonical-boq`, { method: "POST", body: JSON.stringify({ code: boqCode.trim() || null, trade: trade.trim(), description: description.trim(), quantity: Number(quantity), rate: 0, unit_of_measure: uom.trim() }) }); setBoqCode(""); setDescription(""); setQuantity(""); await load(); setSelectedBoqId(String(item.id)); toast({ title: "تم إنشاء بند BOQ مركزي", description: "البند تعريف واحد للمشروع، وليس نسخة لكل وحدة." }) } catch (e) { toast({ title: "فشل إنشاء بند BOQ", description: e instanceof Error && e.message === "SESSION_EXPIRED" ? "انتهت جلسة الدخول، يرجى تسجيل الدخول مرة أخرى" : e instanceof Error ? e.message : "خطأ", variant: "destructive" }) } finally { setSaving(false) } }
+  const applyBoq = async () => { if (!selectedBoqId || selectedUnitIds.size === 0) return; setSaving(true); try { await api(`/projects/${projectId}/canonical-boq/${selectedBoqId}/apply`, { method: "POST", body: JSON.stringify({ unit_ids: Array.from(selectedUnitIds), planned_quantity: plannedPerUnit ? Number(plannedPerUnit) : 0 }) }); setSelectedUnitIds(new Set()); await load(); toast({ title: "تم تطبيق البند على الوحدات", description: "تم إنشاء علاقة التطبيق وتهيئة حالة التنفيذ." }) } catch (e) { toast({ title: "فشل تطبيق البند", description: e instanceof Error && e.message === "SESSION_EXPIRED" ? "انتهت جلسة الدخول، يرجى تسجيل الدخول مرة أخرى" : e instanceof Error ? e.message : "خطأ", variant: "destructive" }) } finally { setSaving(false) } }
   const toggleUnit = (id: number) => setSelectedUnitIds(prev => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next })
   const toggleAllFiltered = () => setSelectedUnitIds(prev => { const ids = filteredUnits.map(u => Number(u.id)); const all = ids.length > 0 && ids.every(id => prev.has(id)); const next = new Set(prev); ids.forEach(id => all ? next.delete(id) : next.add(id)); return next })
 
