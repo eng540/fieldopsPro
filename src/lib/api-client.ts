@@ -10,7 +10,6 @@ export interface SyncStatus { isOnline: boolean; isSyncing: boolean; pendingCoun
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'
 function getAccessToken(): string | null { return useAuthStore.getState().tokens?.accessToken || null }
 
-/** Normalize FastAPI snake_case read payloads to the camelCase UI contract. */
 function snakeToCamelKey(key: string): string {
   return key.replace(/_([a-zA-Z0-9])/g, (_, char: string) => char.toUpperCase())
 }
@@ -50,7 +49,8 @@ async function requestOnce(endpoint: string, options: RequestInit = {}): Promise
   })
 }
 
-async function apiRequest<T>(endpoint: string, options: RequestInit = {}, fallbackToCache = true): Promise<ApiResponse<T>> {
+/** Central authenticated request primitive. Keep endpoint access behind this client. */
+export async function apiRequest<T>(endpoint: string, options: RequestInit = {}, fallbackToCache = true): Promise<ApiResponse<T>> {
   if (!onlineStatus && fallbackToCache) return { success: false, error: 'OFFLINE', fromCache: false }
   try {
     let res = await requestOnce(endpoint, options)
@@ -87,7 +87,7 @@ const syncListeners: Set<(status: SyncStatus) => void> = new Set()
 function notifySyncListeners(pendingCount: number) { syncListeners.forEach(fn => fn({ isOnline: onlineStatus, isSyncing, pendingCount, lastSyncAt: null, errors: [...syncErrors] })) }
 export function onSyncStatusChange(listener: (status: SyncStatus) => void): () => void { syncListeners.add(listener); return () => syncListeners.delete(listener) }
 
-export async function processSyncQueue(): Promise<{ processed: number; failed: number; remaining: number; conflicts: any[] }> {
+async function processSyncQueue(): Promise<{ processed: number; failed: number; remaining: number; conflicts: any[] }> {
   if (isSyncing || !onlineStatus) return { processed: 0, failed: 0, remaining: 0, conflicts: [] }
   isSyncing = true; syncErrors = []; let processed = 0; let failed = 0; const conflicts: any[] = []
   try {
@@ -118,10 +118,7 @@ export async function fullDataSync(orgId: string): Promise<{ success: boolean; s
   isSyncing = true; notifySyncListeners(0)
   try {
     const pull = await apiRequest<any>('/sync/pull', { method: 'POST', body: JSON.stringify({ last_sync_version: null }) })
-    if (pull.success) {
-      for (const wo of pull.data?.bundle?.work_orders || []) await db.boqProgress.put({ id: `wo-${wo.id}`, orgId: String(wo.org_id), unitId: String(wo.project_id), boqItemId: `wo-${wo.id}`, completionPct: wo.completion_pct, status: wo.status, measuredQuantity: null, reworkFlag: wo.rework_flag, reworkReason: null, reworkAuthorizedBy: null, updatedBy: null, pendingSync: false, lastSyncedAt: Date.now() })
-      synced.projects = pull.data?.bundle?.work_orders?.length || 0
-    } else errors.push('sync/pull: ' + (pull.error || 'unknown'))
+    if (pull.success) { for (const wo of pull.data?.bundle?.work_orders || []) await db.boqProgress.put({ id: `wo-${wo.id}`, orgId: String(wo.org_id), unitId: String(wo.project_id), boqItemId: `wo-${wo.id}`, completionPct: wo.completion_pct, status: wo.status, measuredQuantity: null, reworkFlag: wo.rework_flag, reworkReason: null, reworkAuthorizedBy: null, updatedBy: null, pendingSync: false, lastSyncedAt: Date.now() }); synced.projects = pull.data?.bundle?.work_orders?.length || 0 } else errors.push('sync/pull: ' + (pull.error || 'unknown'))
     const [users, remarks, audit] = await Promise.all([apiRequest<any>('/auth/users'), apiRequest<any>('/quality/remarks'), apiRequest<any>('/auth/audit?page_size=100')])
     if (users.success) synced.users = Array.isArray(users.data) ? users.data.length : users.data?.items?.length || 0; else errors.push('users: ' + (users.error || 'unknown'))
     if (remarks.success) synced.remarks = Array.isArray(remarks.data) ? remarks.data.length : remarks.data?.items?.length || 0; else errors.push('remarks: ' + (remarks.error || 'unknown'))
@@ -131,61 +128,16 @@ export async function fullDataSync(orgId: string): Promise<{ success: boolean; s
   finally { isSyncing = false; notifySyncListeners(await getPendingSyncCount()) }
 }
 
-export async function getProjectsHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> {
-  const r = await normalizedHybrid(apiRequest<any>(`/projects?org_id=${encodeURIComponent(orgId)}`))
-  if (r.success && r.data) {
-    const raw = r.data.projects || r.data.items || r.data
-    const data = (Array.isArray(raw) ? raw : []).map((project: any) => ({
-      ...project,
-      id: String(project.id),
-      orgId: String(project.orgId ?? project.org_id ?? ''),
-      totalUnits: Number(project.totalUnits ?? project.total_units ?? 0),
-      completionPct: Number(project.completionPct ?? project.completion_pct ?? 0),
-      isActive: project.isActive !== false,
-      units: (Array.isArray(project.units) ? project.units : []).map((unit: any) => ({
-        ...unit,
-        id: String(unit.id),
-        projectId: String(unit.projectId ?? unit.project_id ?? project.id),
-        completionPct: Number(unit.completionPct ?? unit.completion_pct ?? 0),
-        boqItems: Array.isArray(unit.boqItems) ? unit.boqItems : [],
-      })),
-      assignments: Array.isArray(project.assignments) ? project.assignments : [],
-    }))
-    return { data, fromCache: false }
-  }
-  return { data: await getLocalProjects(), fromCache: true }
-}
-
-export async function getRemarksHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> {
-  const r = await normalizedHybrid(apiRequest<any>('/quality/remarks'))
-  if (r.success && r.data) return { data: Array.isArray(r.data.items) ? r.data.items : Array.isArray(r.data) ? r.data : [], fromCache: false }
-  return { data: await getLocalRemarks(), fromCache: true }
-}
-
-export async function getUsersHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> {
-  const r = await normalizedHybrid(apiRequest<any>('/auth/users'))
-  if (r.success && r.data) return { data: Array.isArray(r.data) ? r.data : Array.isArray(r.data.users) ? r.data.users : Array.isArray(r.data.items) ? r.data.items : [], fromCache: false }
-  return { data: await getLocalUsers(), fromCache: true }
-}
-
-export async function getAuditLogsHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> {
-  const r = await normalizedHybrid(apiRequest<any>('/auth/audit?page_size=100'))
-  if (r.success && r.data) return { data: Array.isArray(r.data.items) ? r.data.items : Array.isArray(r.data) ? r.data : [], fromCache: false }
-  return { data: await getLocalAuditLogs(), fromCache: true }
-}
-
-export async function getDictionariesHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> {
-  const r = await normalizedHybrid(apiRequest<any>(`/projects/dictionaries?org_id=${encodeURIComponent(orgId)}`))
-  if (r.success && r.data) return { data: Array.isArray(r.data.dictionaries) ? r.data.dictionaries : Array.isArray(r.data.items) ? r.data.items : Array.isArray(r.data) ? r.data : [], fromCache: false }
-  return { data: await getLocalDictionaries(), fromCache: true }
-}
-
+export async function getProjectsHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> { const r = await normalizedHybrid(apiRequest<any>(`/projects?org_id=${encodeURIComponent(orgId)}`)); if (r.success && r.data) { const raw = r.data.projects || r.data.items || r.data; const data = (Array.isArray(raw) ? raw : []).map((project: any) => ({ ...project, id: String(project.id), orgId: String(project.orgId ?? project.org_id ?? ''), totalUnits: Number(project.totalUnits ?? project.total_units ?? 0), completionPct: Number(project.completionPct ?? project.completion_pct ?? 0), isActive: project.isActive !== false, units: (Array.isArray(project.units) ? project.units : []).map((unit: any) => ({ ...unit, id: String(unit.id), projectId: String(unit.projectId ?? unit.project_id ?? project.id), completionPct: Number(unit.completionPct ?? unit.completion_pct ?? 0), boqItems: Array.isArray(unit.boqItems) ? unit.boqItems : [] })), assignments: Array.isArray(project.assignments) ? project.assignments : [] })); return { data, fromCache: false } } return { data: await getLocalProjects(), fromCache: true } }
+export async function getRemarksHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> { const r = await normalizedHybrid(apiRequest<any>('/quality/remarks')); if (r.success && r.data) return { data: Array.isArray(r.data.items) ? r.data.items : Array.isArray(r.data) ? r.data : [], fromCache: false }; return { data: await getLocalRemarks(), fromCache: true } }
+export async function getUsersHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> { const r = await normalizedHybrid(apiRequest<any>('/auth/users')); if (r.success && r.data) return { data: Array.isArray(r.data) ? r.data : Array.isArray(r.data.users) ? r.data.users : Array.isArray(r.data.items) ? r.data.items : [], fromCache: true } }
+export async function getAuditLogsHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> { const r = await normalizedHybrid(apiRequest<any>('/auth/audit?page_size=100')); if (r.success && r.data) return { data: Array.isArray(r.data.items) ? r.data.items : Array.isArray(r.data) ? r.data : [], fromCache: false }; return { data: await getLocalAuditLogs(), fromCache: true } }
+export async function getDictionariesHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> { const r = await normalizedHybrid(apiRequest<any>(`/projects/dictionaries?org_id=${encodeURIComponent(orgId)}`)); if (r.success && r.data) return { data: Array.isArray(r.data.dictionaries) ? r.data.dictionaries : Array.isArray(r.data.items) ? r.data.items : Array.isArray(r.data) ? r.data : [], fromCache: false }; return { data: await getLocalDictionaries(), fromCache: true } }
 export async function getLocalProjects(): Promise<any[]> { const projects = await db.projects.toArray(); const result: any[] = []; for (const project of projects) { const units = await db.units.where('projectId').equals(project.id).toArray(); const unitsWithBoq: any[] = []; for (const unit of units) unitsWithBoq.push({ ...unit, boqItems: await db.boqItems.where('unitId').equals(unit.id).toArray() }); result.push({ ...project, units: unitsWithBoq }) } return result }
 export async function getLocalRemarks(): Promise<any[]> { return (await db.remarks.toArray()).map(r => ({ ...r, photos: typeof r.photos === 'string' ? JSON.parse(r.photos) : r.photos, gpsTag: r.gpsTag ? (typeof r.gpsTag === 'string' ? JSON.parse(r.gpsTag) : r.gpsTag) : null, unit: { id: r.unitId, name: '', code: '' } })) }
 export async function getLocalUsers(): Promise<any[]> { return (await db.users.toArray()).map(u => ({ ...u, assignments: typeof u.assignments === 'string' ? JSON.parse(u.assignments) : u.assignments })) }
 export async function getLocalAuditLogs(): Promise<any[]> { return (await db.auditLogs.toArray()).map(l => ({ ...l, details: typeof l.details === 'string' ? JSON.parse(l.details) : l.details })) }
 export async function getLocalDictionaries(): Promise<any[]> { return (await db.dictionaries.toArray()).map(d => ({ ...d, items: typeof d.items === 'string' ? JSON.parse(d.items) : d.items })) }
-
 export async function uploadPhotosToServer(remarkId: string, files: File[]): Promise<{ uploaded: number; urls: string[] }> { const r = await uploadFile(`/quality/remarks/${remarkId}/photos`, files); if (r.success && r.data) return r.data; throw new Error(r.error || 'Upload failed') }
 function _mapEntityType(localType: string): string { const map: Record<string, string> = { project: 'WORK_ORDER', unit: 'UNIT_PROGRESS', boqProgress: 'UNIT_PROGRESS', remark: 'REMARK', photo: 'REMARK', user: 'WORK_ORDER', dictionary: 'WORK_ORDER' }; return map[localType] || 'WORK_ORDER' }
 function _extractEntityId(payload: any, item: { entityType: string; operationUuid: string }): string { return payload.unitId || payload.entity_id || payload.id || item.operationUuid }
