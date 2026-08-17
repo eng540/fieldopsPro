@@ -8,6 +8,7 @@ export interface ApiResponse<T = unknown> { success: boolean; data?: T; error?: 
 export interface SyncStatus { isOnline: boolean; isSyncing: boolean; pendingCount: number; lastSyncAt: number | null; errors: string[] }
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'
+const REQUEST_TIMEOUT_MS = 10_000
 function getAccessToken(): string | null { return useAuthStore.getState().tokens?.accessToken || null }
 function snakeToCamelKey(key: string): string { return key.replace(/_([a-zA-Z0-9])/g, (_, char: string) => char.toUpperCase()) }
 function normalizeApiData<T>(value: T): T {
@@ -23,7 +24,21 @@ if (typeof window !== 'undefined') { window.addEventListener('online', () => { o
 export function isOnline(): boolean { return onlineStatus }
 export function onOnlineStatusChange(listener: (online: boolean) => void): () => void { onlineListeners.add(listener); return () => onlineListeners.delete(listener) }
 
-async function requestOnce(endpoint: string, options: RequestInit = {}): Promise<Response> { const token = getAccessToken(); return fetch(`${API_BASE}${endpoint}`, { ...options, credentials: 'include', headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...options.headers } }) }
+async function requestOnce(endpoint: string, options: RequestInit = {}): Promise<Response> {
+  const token = getAccessToken()
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+  try {
+    return await fetch(`${API_BASE}${endpoint}`, {
+      ...options,
+      credentials: 'include',
+      signal: controller.signal,
+      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...options.headers },
+    })
+  } finally {
+    clearTimeout(timeout)
+  }
+}
 
 /** Central authenticated request primitive. */
 export async function apiRequest<T>(endpoint: string, options: RequestInit = {}, fallbackToCache = true): Promise<ApiResponse<T>> {
@@ -33,7 +48,10 @@ export async function apiRequest<T>(endpoint: string, options: RequestInit = {},
     if (res.status === 401) { try { await useAuthStore.getState().refreshAccessToken(); res = await requestOnce(endpoint, options) } catch { return { success: false, error: 'UNAUTHORIZED' } }; if (res.status === 401) return { success: false, error: 'UNAUTHORIZED' } }
     if (!res.ok) { const errorData = await res.json().catch(() => ({})); return { success: false, error: errorData.detail || errorData.error || `HTTP ${res.status}` } }
     return { success: true, data: await res.json() }
-  } catch (error) { if (!onlineStatus && fallbackToCache) return { success: false, error: 'OFFLINE', fromCache: false }; return { success: false, error: String(error) } }
+  } catch (error: any) {
+    if (!onlineStatus && fallbackToCache) return { success: false, error: 'OFFLINE', fromCache: false }
+    return { success: false, error: error?.name === 'AbortError' ? 'REQUEST_TIMEOUT' : String(error) }
+  }
 }
 
 async function uploadFile(endpoint: string, files: File[], extraFields?: Record<string, string>): Promise<ApiResponse<{ uploaded: number; urls: string[] }>> { if (!onlineStatus) return { success: false, error: 'OFFLINE' }; const formData = new FormData(); for (const file of files) formData.append('files', file); if (extraFields) for (const [key, value] of Object.entries(extraFields)) formData.append(key, value); const send = () => fetch(`${API_BASE}${endpoint}`, { method: 'POST', credentials: 'include', headers: { ...(getAccessToken() ? { Authorization: `Bearer ${getAccessToken()}` } : {}) }, body: formData }); try { let res = await send(); if (res.status === 401) { await useAuthStore.getState().refreshAccessToken(); res = await send() }; if (!res.ok) { const e = await res.json().catch(() => ({})); return { success: false, error: e.detail || `HTTP ${res.status}` } }; return { success: true, data: await res.json() } } catch (error) { return { success: false, error: String(error) } } }
