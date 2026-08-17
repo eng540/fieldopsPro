@@ -123,15 +123,42 @@ async function hydrateProjectRuntime(project: any): Promise<any> {
   const canonical = canonicalResult.success && canonicalResult.data ? canonicalResult.data : {}
   const aggregation = aggregationResult.success && aggregationResult.data ? aggregationResult.data : {}
   const states = stateResult.success && stateResult.data ? stateResult.data.items || [] : []
-  const boqItems = (Array.isArray(canonical.boqItems) ? canonical.boqItems : Array.isArray(project.boqItems) ? project.boqItems : []).map(normalizeProjectBoqItem)
+  const boqItems = (Array.isArray(canonical.boqItems)
+    ? canonical.boqItems
+    : Array.isArray(canonical.boq_items)
+      ? canonical.boq_items
+      : Array.isArray(project.boqItems)
+        ? project.boqItems
+        : Array.isArray(project.boq_items)
+          ? project.boq_items
+          : []).map(normalizeProjectBoqItem)
   const boqById = new Map(boqItems.map((item: any) => [String(item.id), item]))
-  const assignments = Array.isArray(canonical.assignments) ? canonical.assignments : []
-  const stateByKey = new Map<string, any>(states.map((state: any) => [
-    `${String(state.unitId)}:${String(state.boqItemId)}`,
-    state,
-  ] as [string, any]))
-  const aggregationUnits = new Map<string, any>((aggregation.units || []).map((unit: any) => [String(unit.unitId), unit] as [string, any]))
-  const baseUnits = Array.isArray(canonical.units) && canonical.units.length ? canonical.units : (Array.isArray(project.units) ? project.units : [])
+  const assignments = (Array.isArray(canonical.assignments)
+    ? canonical.assignments
+    : Array.isArray(canonical.unit_boq_assignments)
+      ? canonical.unit_boq_assignments
+      : []).map((assignment: any) => ({
+        ...assignment,
+        unitId: String(assignment.unitId ?? assignment.unit_id ?? ''),
+        boqItemId: String(assignment.boqItemId ?? assignment.boq_item_id ?? ''),
+        plannedQuantity: Number(assignment.plannedQuantity ?? assignment.planned_quantity ?? 0),
+        isActive: assignment.isActive ?? assignment.is_active ?? true,
+      }))
+  const stateByKey = new Map<string, any>(states.map((state: any) => {
+    const normalized = {
+      ...state,
+      unitId: String(state.unitId ?? state.unit_id ?? ''),
+      boqItemId: String(state.boqItemId ?? state.boq_item_id ?? ''),
+      completionPct: Number(state.completionPct ?? state.completion_pct ?? 0),
+      stateVersion: Number(state.stateVersion ?? state.state_version ?? 1),
+      actualQuantity: state.actualQuantity ?? state.actual_quantity ?? null,
+      status: state.status ?? 'NOT_STARTED',
+    }
+    return [`${normalized.unitId}:${normalized.boqItemId}`, normalized] as [string, any]
+  }))
+  const aggregationUnits = new Map<string, any>((Array.isArray(aggregation.units) ? aggregation.units : []).map((unit: any) => [String(unit.unitId ?? unit.unit_id), unit] as [string, any]))
+  const canonicalUnits = Array.isArray(canonical.units) ? canonical.units : Array.isArray(canonical.project_units) ? canonical.project_units : []
+  const baseUnits = canonicalUnits.length ? canonicalUnits : (Array.isArray(project.units) ? project.units : Array.isArray(project.project_units) ? project.project_units : [])
   const units = baseUnits.map((unit: any) => {
     const unitId = String(unit.id)
     const assignedItems = assignments
@@ -194,15 +221,15 @@ export async function getProjectsHybrid(orgId: string): Promise<{ data: any[]; f
       totalUnits: Number(project.totalUnits ?? project.total_units ?? 0),
       completionPct: Number(project.completionPct ?? project.completion_pct ?? 0),
       isActive: project.isActive !== false,
-      units: (Array.isArray(project.units) ? project.units : []).map((unit: any) => ({
+      units: (Array.isArray(project.units) ? project.units : Array.isArray(project.project_units) ? project.project_units : []).map((unit: any) => ({
         ...unit,
         id: String(unit.id),
         projectId: String(unit.projectId ?? unit.project_id ?? project.id),
         completionPct: Number(unit.completionPct ?? unit.completion_pct ?? 0),
-        boqItems: Array.isArray(unit.boqItems) ? unit.boqItems : [],
+        boqItems: (Array.isArray(unit.boqItems) ? unit.boqItems : Array.isArray(unit.boq_items) ? unit.boq_items : []).map(normalizeProjectBoqItem),
       })),
-      boqItems: Array.isArray(project.boqItems) ? project.boqItems.map(normalizeProjectBoqItem) : [],
-      assignments: Array.isArray(project.assignments) ? project.assignments : [],
+      boqItems: (Array.isArray(project.boqItems) ? project.boqItems : Array.isArray(project.boq_items) ? project.boq_items : []).map(normalizeProjectBoqItem),
+      assignments: Array.isArray(project.assignments) ? project.assignments : Array.isArray(project.unit_boq_assignments) ? project.unit_boq_assignments : [],
     }))
     const data = await Promise.all(base.map(hydrateProjectRuntime))
     return { data, fromCache: false }
