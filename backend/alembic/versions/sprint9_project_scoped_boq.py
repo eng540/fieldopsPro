@@ -22,7 +22,6 @@ def upgrade() -> None:
     op.add_column("boq_items", sa.Column("amount", sa.Float(), nullable=False, server_default="0"))
     op.add_column("boq_items", sa.Column("sequence", sa.Integer(), nullable=False, server_default="0"))
     op.add_column("boq_items", sa.Column("extra_data", sa.JSON(), nullable=True))
-
     op.execute("""
         UPDATE boq_items b
         SET project_id = u.project_id,
@@ -35,7 +34,6 @@ def upgrade() -> None:
     op.execute("UPDATE boq_items SET project_id = (SELECT id FROM projects WHERE projects.org_id = boq_items.org_id ORDER BY id LIMIT 1) WHERE project_id IS NULL")
     op.alter_column("boq_items", "project_id", nullable=False)
     op.alter_column("boq_items", "code", nullable=False)
-
     op.create_foreign_key("fk_boq_items_project", "boq_items", "projects", ["project_id"], ["id"])
     op.create_unique_constraint("uq_boq_items_project_code", "boq_items", ["project_id", "code"])
     op.create_index("ix_boq_items_project_id", "boq_items", ["project_id"])
@@ -56,7 +54,6 @@ def upgrade() -> None:
     op.create_index("ix_unit_boq_assignment_org", "unit_boq_assignments", ["org_id"])
     op.create_index("ix_unit_boq_assignment_unit", "unit_boq_assignments", ["unit_id"])
     op.create_index("ix_unit_boq_assignment_boq", "unit_boq_assignments", ["boq_item_id"])
-
     op.execute("""
         INSERT INTO unit_boq_assignments (org_id, unit_id, boq_item_id, planned_quantity)
         SELECT org_id, unit_id, id, quantity
@@ -64,14 +61,29 @@ def upgrade() -> None:
         WHERE unit_id IS NOT NULL
         ON CONFLICT (unit_id, boq_item_id) DO NOTHING
     """)
-
-    # unit_id is retained temporarily as a nullable compatibility column for old
-    # integrations, but it is no longer used as the ownership relationship.
-    op.alter_column("boq_items", "unit_id", nullable=True)
     op.execute("UPDATE boq_items SET unit_id = NULL")
+    op.alter_column("boq_items", "unit_id", nullable=True)
+
+    op.execute("ALTER TABLE unit_boq_assignments ENABLE ROW LEVEL SECURITY")
+    op.execute("ALTER TABLE unit_boq_assignments FORCE ROW LEVEL SECURITY")
+    op.execute("""
+        CREATE POLICY unit_boq_assignment_org_isolation ON unit_boq_assignments
+        FOR ALL USING (
+            current_setting('app.current_org_id', true) IS NULL
+            OR current_setting('app.current_org_id', true) = ''
+            OR org_id = NULLIF(current_setting('app.current_org_id', true), '')::INTEGER
+        ) WITH CHECK (
+            current_setting('app.current_org_id', true) IS NULL
+            OR current_setting('app.current_org_id', true) = ''
+            OR org_id = NULLIF(current_setting('app.current_org_id', true), '')::INTEGER
+        )
+    """)
 
 
 def downgrade() -> None:
+    op.execute("DROP POLICY IF EXISTS unit_boq_assignment_org_isolation ON unit_boq_assignments")
+    op.execute("ALTER TABLE unit_boq_assignments NO FORCE ROW LEVEL SECURITY")
+    op.execute("ALTER TABLE unit_boq_assignments DISABLE ROW LEVEL SECURITY")
     op.drop_index("ix_unit_boq_assignment_boq", table_name="unit_boq_assignments")
     op.drop_index("ix_unit_boq_assignment_unit", table_name="unit_boq_assignments")
     op.drop_index("ix_unit_boq_assignment_org", table_name="unit_boq_assignments")
