@@ -182,16 +182,17 @@ export const db = new FieldOpsDatabase()
 // Sync Queue Helpers
 // ============================================================
 
-export async function addToSyncQueue(item: Omit<SyncQueueItem, 'id' | 'createdAt' | 'processedAt' | 'status' | 'retryCount' | 'lastError'>): Promise<number> {
-  return db.syncQueue.add({
+export async function addToSyncQueue(item: Omit<SyncQueueItem, 'id' | 'createdAt' | 'processedAt' | 'status' | 'retryCount' | 'lastError' | 'serverData'> & { serverData?: string | null }): Promise<number> {
+  return (await db.syncQueue.add({
     ...item,
     status: 'PENDING',
     retryCount: 0,
     maxRetries: item.maxRetries || 3,
     lastError: null,
+    serverData: item.serverData ?? null,
     createdAt: Date.now(),
     processedAt: null,
-  })
+  })) as number
 }
 
 export async function getPendingSyncCount(): Promise<number> {
@@ -579,20 +580,24 @@ export async function saveRemarkOffline(
 export async function getLocalDatabaseStats(): Promise<{
   projects: number; units: number; boqItems: number;
   boqProgress: number; remarks: number; photos: number;
+  users: number; auditLogs: number; dictionaries: number;
   pendingSync: number; syncQueue: number;
 }> {
-  const [projects, units, boqItems, boqProgress, remarks, photos, pendingSync, syncQueue] = await Promise.all([
+  const [projects, units, boqItems, boqProgress, remarks, photos, users, auditLogs, dictionaries, pendingSync, syncQueue] = await Promise.all([
     db.projects.count(),
     db.units.count(),
     db.boqItems.count(),
     db.boqProgress.count(),
     db.remarks.count(),
     db.photos.count(),
+    db.users.count(),
+    db.auditLogs.count(),
+    db.dictionaries.count(),
     db.boqProgress.where('pendingSync').equals(1).count(),
     db.syncQueue.where('status').equals('PENDING').count(),
   ])
 
-  return { projects, units, boqItems, boqProgress, remarks, photos, pendingSync, syncQueue }
+  return { projects, units, boqItems, boqProgress, remarks, photos, users, auditLogs, dictionaries, pendingSync, syncQueue }
 }
 
 // ============================================================

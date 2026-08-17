@@ -21,6 +21,8 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<{ da
 
 export async function getOrgSummary() { return request<any>('/reporting/summary') }
 export async function getProjectProgress() { return request<any>('/reporting/project-progress') }
+export async function getProjectExecutionAggregation(projectId: string) { return request<any>(`/execution/aggregation/project/${encodeURIComponent(projectId)}`) }
+export async function getExecutionState(projectId: string) { return request<any>(`/execution/state?project_id=${encodeURIComponent(projectId)}&page=1&page_size=500`) }
 export async function getWorkOrderSummary() { return request<any>('/reporting/work-orders') }
 export async function getProjectDashboard(projectId: string) { return request<any>(`/reporting/dashboard/${encodeURIComponent(projectId)}`) }
 export async function getExecutionEvents(params: { page?: number; page_size?: number; event_type?: string; unit_id?: string; boq_item_id?: string } = {}) {

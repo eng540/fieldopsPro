@@ -71,18 +71,25 @@ export default function ProjectConfigurationPage() {
     if (!orgId || !projectId) return
     setLoading(true)
     try {
-      const [projectResponse, dictResponse, unitResponse, canonical] = await Promise.all([
-        api<any>(`/projects/${projectId}`),
+      // Load the project first. A failure in dictionaries/canonical BOQ must not
+      // turn an accessible project into the misleading "not found" empty state.
+      const projectResponse = await api<any>(`/projects/${projectId}`)
+      setProject(projectResponse)
+      const [dictResult, unitResult, canonicalResult] = await Promise.allSettled([
         api<any>(`/projects/dictionaries?project_id=${encodeURIComponent(projectId)}`),
         api<any>(`/projects/${projectId}/units`),
         api<any>(`/projects/${projectId}/canonical-boq`),
       ])
-      setProject(projectResponse)
+      const dictResponse = dictResult.status === "fulfilled" ? dictResult.value : []
+      const unitResponse = unitResult.status === "fulfilled" ? unitResult.value : { items: [] }
+      const canonical = canonicalResult.status === "fulfilled" ? canonicalResult.value : {}
       setDictionaries(Array.isArray(dictResponse) ? dictResponse : dictResponse.items || [])
       setUnits((canonical.units || unitResponse.items || []).map((u: any) => ({ ...u, id: String(u.id), unitType: u.unitType ?? u.unit_type ?? "", floor: u.floor ?? null, areaSqm: u.areaSqm ?? u.area_sqm ?? null })))
       setBoq((canonical.boq_items || []).map((b: any) => ({ ...b, id: String(b.id), unitOfMeasure: b.unitOfMeasure ?? b.unit_of_measure ?? "item", completionPct: Number(b.completionPct ?? b.completion_pct ?? 0) })))
       setAssignments(canonical.assignments || [])
-    } catch (e) { toast({ title: "تعذر تحميل إعدادات المشروع", description: e instanceof Error && e.message === "SESSION_EXPIRED" ? "انتهت جلسة الدخول، يرجى تسجيل الدخول مرة أخرى" : e instanceof Error ? e.message : "خطأ غير متوقع", variant: "destructive" }) }
+      const partialFailures = [dictResult, unitResult, canonicalResult].filter(r => r.status === "rejected")
+      if (partialFailures.length) toast({ title: "تم تحميل المشروع جزئيًا", description: "تعذر تحميل بعض بيانات الإعداد؛ يمكنك إعادة المحاولة من زر التحديث.", variant: "destructive" })
+    } catch (e) { toast({ title: "تعذر تحميل المشروع", description: e instanceof Error && e.message === "SESSION_EXPIRED" ? "انتهت جلسة الدخول، يرجى تسجيل الدخول مرة أخرى" : e instanceof Error ? e.message : "خطأ غير متوقع", variant: "destructive" }) }
     finally { setLoading(false) }
   }
   useEffect(() => { load() }, [orgId, projectId])

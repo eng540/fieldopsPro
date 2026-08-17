@@ -106,6 +106,7 @@ export function useLocalDatabaseStats() {
   const [stats, setStats] = useState<{
     projects: number; units: number; boqItems: number;
     boqProgress: number; remarks: number; photos: number;
+    users: number; auditLogs: number; dictionaries: number;
     pendingSync: number; syncQueue: number;
   } | null>(null)
 
