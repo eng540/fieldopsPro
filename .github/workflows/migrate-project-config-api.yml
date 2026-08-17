@@ -1,0 +1,93 @@
+name: Migrate Project Configuration API Transport
+
+on:
+  push:
+    branches:
+      - fieldops-v4
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: fieldops-v4
+          fetch-depth: 1
+
+      - name: Migrate Project Configuration transport
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('src/app/projects/configuration/page.tsx')
+          text = path.read_text(encoding='utf-8')
+
+          if 'import { apiRequest } from "@/lib/api-client"' not in text:
+              text = text.replace(
+                  'import { useAuthStore } from "@/lib/auth-store"',
+                  'import { useAuthStore } from "@/lib/auth-store"\nimport { apiRequest } from "@/lib/api-client"'
+              )
+
+          text = re.sub(
+              r'const API_BASE = process\.env\.NEXT_PUBLIC_API_URL \|\| "http://localhost:8000/api/v1"\n',
+              '',
+              text,
+              count=1,
+          )
+
+          old = re.compile(
+              r'async function api<T>\(endpoint: string, options: RequestInit = \{\}\): Promise<T> \{.*?\n\}\n\nexport default function ProjectConfigurationPage',
+              re.S,
+          )
+          new = '''async function api<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
+            const result = await apiRequest<T>(endpoint, options)
+            if (!result.success) {
+              if (result.error === "UNAUTHORIZED") {
+                throw new Error("SESSION_EXPIRED")
+              }
+              throw new Error(result.error || "API_REQUEST_FAILED")
+            }
+            return result.data as T
+          }
+
+          export default function ProjectConfigurationPage'''
+          text, count = old.subn(new, text, count=1)
+          if count != 1:
+              raise SystemExit('Expected Project Configuration API wrapper was not found; refusing to modify file')
+
+          text = text.replace(
+              'description: e instanceof Error ? e.message : "خطأ غير متوقع"',
+              'description: e instanceof Error && e.message === "SESSION_EXPIRED" ? "انتهت جلسة الدخول، يرجى تسجيل الدخول مرة أخرى" : e instanceof Error ? e.message : "خطأ غير متوقع"'
+          )
+          text = text.replace(
+              'description: e instanceof Error ? e.message : "خطأ"',
+              'description: e instanceof Error && e.message === "SESSION_EXPIRED" ? "انتهت جلسة الدخول، يرجى تسجيل الدخول مرة أخرى" : e instanceof Error ? e.message : "خطأ"'
+          )
+
+          path.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Verify migration
+        run: |
+          grep -q 'import { apiRequest } from "@/lib/api-client"' src/app/projects/configuration/page.tsx
+          ! grep -q 'const API_BASE = process.env.NEXT_PUBLIC_API_URL' src/app/projects/configuration/page.tsx
+          grep -q 'const result = await apiRequest<T>(endpoint, options)' src/app/projects/configuration/page.tsx
+
+      - name: Commit migration
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/app/projects/configuration/page.tsx
+          if git diff --cached --quiet; then
+            echo 'No migration changes required.'
+            exit 0
+          fi
+          git commit -m 'refactor(project-config): use centralized API transport'
+          git push origin fieldops-v4
