@@ -1,4 +1,4 @@
-#  FieldOps V4.0 — منصة العمليات الميدانية المتقدمة
+#  FieldOps  V4.0 — منصة العمليات الميدانية المتقدمة
 
 > نظام إنتاج جاهز (Production-Ready) — FastAPI + PostgreSQL + Redis + Next.js 16 + Docker Compose
 
