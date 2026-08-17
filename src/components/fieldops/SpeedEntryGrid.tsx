@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, useCallback } from 'react'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -18,6 +18,7 @@ import { BulkExecutionActions } from './BulkExecutionActions'
 
 interface Props { project: any | null; orgId: string; onRefresh: () => void }
 interface Cell { unitId: number; boqId: number; value: number; original: number }
+interface EventBatchResponse { succeeded?: any[]; conflicts?: any[]; failed?: any[] }
 
 /** Project BOQ is the definition; Unit x BOQ execution state is the operational value. */
 export function SpeedEntryGrid({ project, orgId, onRefresh }: Props) {
@@ -45,78 +46,66 @@ export function SpeedEntryGrid({ project, orgId, onRefresh }: Props) {
     return Array.from(map.values())
   }, [project, units])
 
-  useEffect(() => {
-    let active = true
-    async function load() {
-      if (!project?.id) { setExecutionStates({}); return }
-      setLoadingState(true)
-      try {
-        const result = await listExecutionState(project.id, 500)
-        if (!active) return
-        const next: Record<string, { completion_pct: number; state_version: number }> = {}
-        for (const row of result.items || []) next[`${row.unit_id}:${row.boq_item_id}`] = { completion_pct: Number(row.completion_pct || 0), state_version: Number(row.state_version || 1) }
-        setExecutionStates(next)
-      } catch {
-        if (active) toast({ title: 'تعذر تحميل حالة التنفيذ', description: 'سيتم استخدام الحالة المحلية حتى تتوفر البيانات.', variant: 'destructive' })
-      } finally {
-        if (active) setLoadingState(false)
-      }
-    }
-    load()
-    return () => { active = false }
+  const loadExecutionStates = useCallback(async () => {
+    if (!project?.id) { setExecutionStates({}); return }
+    setLoadingState(true)
+    try {
+      const result = await listExecutionState(project.id, 500)
+      const next: Record<string, { completion_pct: number; state_version: number }> = {}
+      for (const row of result.items || []) next[`${row.unit_id}:${row.boq_item_id}`] = { completion_pct: Number(row.completion_pct || 0), state_version: Number(row.state_version || 1) }
+      setExecutionStates(next)
+    } catch { toast({ title: 'تعذر تحميل حالة التنفيذ', description: 'سيتم استخدام الحالة المحلية حتى تتوفر البيانات.', variant: 'destructive' }) }
+    finally { setLoadingState(false) }
   }, [project?.id, toast])
 
+  useEffect(() => { void loadExecutionStates() }, [loadExecutionStates])
+
   const keyFor = (unitId:number, boqId:number) => `${unitId}:${boqId}`
-  const getCell = (u:any, b:any):Cell => {
-    const key = keyFor(Number(u.id), Number(b.id))
-    if (drafts[key]) return drafts[key]
-    const state = executionStates[key]
-    const v = Number(state?.completion_pct ?? 0)
-    return { unitId:Number(u.id), boqId:Number(b.id), value:v, original:v }
-  }
-  const setCell = (u:any,b:any,raw:string) => {
-    const v = Math.max(0, Math.min(100, Number(raw) || 0))
-    const c = getCell(u,b)
-    setDrafts(d => ({ ...d, [keyFor(c.unitId,c.boqId)]: { ...c, value:v } }))
-  }
-  const visibleCells = useMemo(() => {
-    const a:Cell[] = []
-    for (const u of units) for (const b of boqColumns) if ((u.boqItems || []).some((x:any) => Number(x.id) === Number(b.id))) a.push(getCell(u,b))
-    return a
-  }, [units, boqColumns, drafts, executionStates])
+  const getCell = (u:any, b:any):Cell => { const key = keyFor(Number(u.id), Number(b.id)); if (drafts[key]) return drafts[key]; const state = executionStates[key]; const v = Number(state?.completion_pct ?? 0); return { unitId:Number(u.id), boqId:Number(b.id), value:v, original:v } }
+  const setCell = (u:any,b:any,raw:string) => { const v = Math.max(0, Math.min(100, Number(raw) || 0)); const c = getCell(u,b); setDrafts(d => ({ ...d, [keyFor(c.unitId,c.boqId)]: { ...c, value:v } })) }
+  const visibleCells = useMemo(() => { const a:Cell[] = []; for (const u of units) for (const b of boqColumns) if ((u.boqItems || []).some((x:any) => Number(x.id) === Number(b.id))) a.push(getCell(u,b)); return a }, [units, boqColumns, drafts, executionStates])
   const dirtyCells = visibleCells.filter(c => c.value !== c.original)
   const toggleUnit = (id:number) => setSelectedUnits(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n })
   const toggleAll = () => setSelectedUnits(prev => prev.size === units.length ? new Set() : new Set(units.map((u:any) => Number(u.id))))
-  const applyBulk = (unitIds:number[],boqIds:number[],value:number) => setDrafts(current => {
-    const next = {...current}
-    for (const u of units) if (unitIds.includes(Number(u.id))) for (const b of (u.boqItems || [])) if (boqIds.includes(Number(b.id))) { const c=getCell(u,b); next[keyFor(c.unitId,c.boqId)]={...c,value} }
-    return next
-  })
+  const applyBulk = (unitIds:number[],boqIds:number[],value:number) => setDrafts(current => { const next = {...current}; for (const u of units) if (unitIds.includes(Number(u.id))) for (const b of (u.boqItems || [])) if (boqIds.includes(Number(b.id))) { const c=getCell(u,b); next[keyFor(c.unitId,c.boqId)]={...c,value} } return next })
 
   const saveCell = async (c:Cell) => {
     if (c.value === c.original) return
     if (c.value < c.original) { setRework({key:keyFor(c.unitId,c.boqId),cell:c,next:c.value}); return }
     try {
       const state = await getExecutionState(c.unitId,c.boqId)
-      await submitProgressEvent({unitId:c.unitId,boqItemId:c.boqId,expectedVersion:Number(state?.state_version ?? executionStates[keyFor(c.unitId,c.boqId)]?.state_version ?? 1),completionPct:c.value,currentPct:Number(state?.completion_pct ?? c.original)})
+      const response = await submitProgressEvent({unitId:c.unitId,boqItemId:c.boqId,expectedVersion:Number(state?.state_version ?? executionStates[keyFor(c.unitId,c.boqId)]?.state_version ?? 1),completionPct:c.value,currentPct:Number(state?.completion_pct ?? c.original)}) as EventBatchResponse
+      if ((response.failed || []).length || (response.conflicts || []).length) throw new Error((response.failed || [])[0]?.error || 'تعارض في حالة التنفيذ')
     } catch (error) {
       if (!isOnline()) { await queueProgressOffline(orgId,{unitId:String(c.unitId),boqItemId:String(c.boqId),completionPct:c.value,reworkFlag:false,reworkReason:''}); return }
       throw error
     }
   }
+
   const saveAll = async () => {
     if (!dirtyCells.length || busy) return
+    const cellsToSave = [...dirtyCells]
     setBusy(true)
-    try { for (const c of dirtyCells) await saveCell(c); setDrafts({}); await onRefresh(); toast({title:'تم حفظ الإدخال السريع',description:`${dirtyCells.length} تغيير`}) }
-    catch (error) { toast({title:'تعذر حفظ الإدخال السريع',description:String(error),variant:'destructive'}) }
-    finally { setBusy(false) }
+    try {
+      for (const c of cellsToSave) await saveCell(c)
+      await loadExecutionStates()
+      setDrafts({})
+      await onRefresh()
+      toast({title:'تم حفظ الإدخال السريع',description:`تم حفظ ${cellsToSave.length} تغيير وتحديث حالة التنفيذ.`})
+    } catch (error) {
+      await loadExecutionStates()
+      toast({title:'تعذر حفظ الإدخال السريع',description:error instanceof Error ? error.message : String(error),variant:'destructive'})
+    } finally { setBusy(false) }
   }
+
   const confirmRework = async () => {
     if (!rework || reason.trim().length < 20 || busy) return
     setBusy(true)
     try {
       const s = await getExecutionState(rework.cell.unitId,rework.cell.boqId)
-      await submitProgressEvent({unitId:rework.cell.unitId,boqItemId:rework.cell.boqId,expectedVersion:Number(s?.state_version ?? 1),completionPct:rework.next,currentPct:Number(s?.completion_pct ?? rework.cell.original),reworkReason:reason.trim()})
+      const response = await submitProgressEvent({unitId:rework.cell.unitId,boqItemId:rework.cell.boqId,expectedVersion:Number(s?.state_version ?? 1),completionPct:rework.next,currentPct:Number(s?.completion_pct ?? rework.cell.original),reworkReason:reason.trim()}) as EventBatchResponse
+      if ((response.failed || []).length || (response.conflicts || []).length) throw new Error((response.failed || [])[0]?.error || 'تعذر تسجيل إعادة التنفيذ')
+      await loadExecutionStates()
       setDrafts(d => ({...d,[rework.key]:{...rework.cell,value:rework.next,original:rework.next}})); setRework(null); setReason(''); await onRefresh(); toast({title:'تم تسجيل إعادة التنفيذ'})
     } catch(error) { toast({title:'تعذر تسجيل إعادة التنفيذ',description:String(error),variant:'destructive'}) }
     finally { setBusy(false) }
