@@ -10,9 +10,14 @@ class ProjectCreate(BaseModel):
     @classmethod
     def code_uppercase(cls, v: str) -> str: return v.upper().strip()
 class BOQItemCreate(BaseModel):
-    trade: str = Field(min_length=1, max_length=100); description: str = Field(min_length=1); quantity: float = Field(ge=0); unit_of_measure: str = Field(default="item", max_length=50)
+    code: str | None = Field(default=None, max_length=80); category: str | None = Field(default=None, max_length=120); trade: str = Field(min_length=1, max_length=100); description: str = Field(min_length=1); quantity: float = Field(ge=0); rate: float = Field(default=0, ge=0); unit_of_measure: str = Field(default="item", max_length=50); sequence: int = Field(default=0, ge=0); extra_data: dict[str, Any] | None = None
 class BOQItemRead(BaseModel):
-    id: int; org_id: int; unit_id: int; trade: str; description: str; quantity: float; unit_of_measure: str; completion_pct: float; is_active: bool; created_at: datetime
+    id: int; org_id: int; project_id: int; code: str; category: str | None; trade: str; description: str; quantity: float; rate: float; amount: float; unit_of_measure: str; sequence: int; completion_pct: float; is_active: bool; created_at: datetime
+    model_config = {"from_attributes": True}
+class UnitBoQAssignmentCreate(BaseModel):
+    planned_quantity: float = Field(default=0, ge=0); is_active: bool = True; extra_data: dict[str, Any] | None = None
+class UnitBoQAssignmentRead(BaseModel):
+    id: int; org_id: int; unit_id: int; boq_item_id: int; planned_quantity: float; is_active: bool; extra_data: dict[str, Any] | None; created_at: datetime; updated_at: datetime
     model_config = {"from_attributes": True}
 class UnitCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255); code: str = Field(min_length=1, max_length=50); unit_type: str | None = None; floor: int | None = None; area_sqm: float | None = None
@@ -26,7 +31,7 @@ class UnitRead(BaseModel):
 class UnitListResponse(BaseModel): items: list[UnitRead]; total: int
 class ProjectRead(BaseModel):
     id: int; org_id: int; name: str; code: str; description: str | None; status: str; location: str | None; start_date: str | None; end_date: str | None; total_units: int; completion_pct: float; is_active: bool; created_at: datetime; updated_at: datetime
-    units: list[UnitRead] = Field(default_factory=list); assignments: list[Any] = Field(default_factory=list)
+    units: list[UnitRead] = Field(default_factory=list); boq_items: list[BOQItemRead] = Field(default_factory=list); assignments: list[Any] = Field(default_factory=list)
     model_config = {"from_attributes": True}
 class ProjectUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=2, max_length=255); description: str | None = None; status: str | None = None; location: str | None = None; start_date: str | None = None; end_date: str | None = None
