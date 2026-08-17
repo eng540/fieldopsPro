@@ -9,77 +9,34 @@ export interface SyncStatus { isOnline: boolean; isSyncing: boolean; pendingCoun
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'
 function getAccessToken(): string | null { return useAuthStore.getState().tokens?.accessToken || null }
-
-function snakeToCamelKey(key: string): string {
-  return key.replace(/_([a-zA-Z0-9])/g, (_, char: string) => char.toUpperCase())
-}
-
+function snakeToCamelKey(key: string): string { return key.replace(/_([a-zA-Z0-9])/g, (_, char: string) => char.toUpperCase()) }
 function normalizeApiData<T>(value: T): T {
   if (Array.isArray(value)) return value.map(item => normalizeApiData(item)) as T
-  if (value && typeof value === 'object' && !(value instanceof Date)) {
-    const source = value as Record<string, unknown>
-    const result: Record<string, unknown> = {}
-    for (const [key, item] of Object.entries(source)) result[snakeToCamelKey(key)] = normalizeApiData(item)
-    return result as T
-  }
+  if (value && typeof value === 'object' && !(value instanceof Date)) { const source = value as Record<string, unknown>; const result: Record<string, unknown> = {}; for (const [key, item] of Object.entries(source)) result[snakeToCamelKey(key)] = normalizeApiData(item); return result as T }
   return value
 }
-
-async function normalizedHybrid<T>(request: Promise<ApiResponse<T>>): Promise<ApiResponse<T>> {
-  const response = await request
-  if (response.success && response.data !== undefined) return { ...response, data: normalizeApiData(response.data) }
-  return response
-}
+async function normalizedHybrid<T>(request: Promise<ApiResponse<T>>): Promise<ApiResponse<T>> { const response = await request; if (response.success && response.data !== undefined) return { ...response, data: normalizeApiData(response.data) }; return response }
 
 let onlineStatus = typeof window !== 'undefined' ? navigator.onLine : true
 const onlineListeners: Set<(online: boolean) => void> = new Set()
-if (typeof window !== 'undefined') {
-  window.addEventListener('online', () => { onlineStatus = true; onlineListeners.forEach(fn => fn(true)); processSyncQueue() })
-  window.addEventListener('offline', () => { onlineStatus = false; onlineListeners.forEach(fn => fn(false)) })
-}
+if (typeof window !== 'undefined') { window.addEventListener('online', () => { onlineStatus = true; onlineListeners.forEach(fn => fn(true)); processSyncQueue() }); window.addEventListener('offline', () => { onlineStatus = false; onlineListeners.forEach(fn => fn(false)) }) }
 export function isOnline(): boolean { return onlineStatus }
 export function onOnlineStatusChange(listener: (online: boolean) => void): () => void { onlineListeners.add(listener); return () => onlineListeners.delete(listener) }
 
-async function requestOnce(endpoint: string, options: RequestInit = {}): Promise<Response> {
-  const token = getAccessToken()
-  return fetch(`${API_BASE}${endpoint}`, {
-    ...options,
-    credentials: 'include',
-    headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...options.headers },
-  })
-}
+async function requestOnce(endpoint: string, options: RequestInit = {}): Promise<Response> { const token = getAccessToken(); return fetch(`${API_BASE}${endpoint}`, { ...options, credentials: 'include', headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...options.headers } }) }
 
-/** Central authenticated request primitive. Keep endpoint access behind this client. */
+/** Central authenticated request primitive. */
 export async function apiRequest<T>(endpoint: string, options: RequestInit = {}, fallbackToCache = true): Promise<ApiResponse<T>> {
   if (!onlineStatus && fallbackToCache) return { success: false, error: 'OFFLINE', fromCache: false }
   try {
     let res = await requestOnce(endpoint, options)
-    if (res.status === 401) {
-      try { await useAuthStore.getState().refreshAccessToken(); res = await requestOnce(endpoint, options) }
-      catch { return { success: false, error: 'UNAUTHORIZED' } }
-      if (res.status === 401) return { success: false, error: 'UNAUTHORIZED' }
-    }
+    if (res.status === 401) { try { await useAuthStore.getState().refreshAccessToken(); res = await requestOnce(endpoint, options) } catch { return { success: false, error: 'UNAUTHORIZED' } }; if (res.status === 401) return { success: false, error: 'UNAUTHORIZED' } }
     if (!res.ok) { const errorData = await res.json().catch(() => ({})); return { success: false, error: errorData.detail || errorData.error || `HTTP ${res.status}` } }
     return { success: true, data: await res.json() }
-  } catch (error) {
-    if (!onlineStatus && fallbackToCache) return { success: false, error: 'OFFLINE', fromCache: false }
-    return { success: false, error: String(error) }
-  }
+  } catch (error) { if (!onlineStatus && fallbackToCache) return { success: false, error: 'OFFLINE', fromCache: false }; return { success: false, error: String(error) } }
 }
 
-async function uploadFile(endpoint: string, files: File[], extraFields?: Record<string, string>): Promise<ApiResponse<{ uploaded: number; urls: string[] }>> {
-  if (!onlineStatus) return { success: false, error: 'OFFLINE' }
-  const formData = new FormData()
-  for (const file of files) formData.append('files', file)
-  if (extraFields) for (const [key, value] of Object.entries(extraFields)) formData.append(key, value)
-  const send = () => fetch(`${API_BASE}${endpoint}`, { method: 'POST', credentials: 'include', headers: { ...(getAccessToken() ? { Authorization: `Bearer ${getAccessToken()}` } : {}) }, body: formData })
-  try {
-    let res = await send()
-    if (res.status === 401) { await useAuthStore.getState().refreshAccessToken(); res = await send() }
-    if (!res.ok) { const e = await res.json().catch(() => ({})); return { success: false, error: e.detail || `HTTP ${res.status}` } }
-    return { success: true, data: await res.json() }
-  } catch (error) { return { success: false, error: String(error) } }
-}
+async function uploadFile(endpoint: string, files: File[], extraFields?: Record<string, string>): Promise<ApiResponse<{ uploaded: number; urls: string[] }>> { if (!onlineStatus) return { success: false, error: 'OFFLINE' }; const formData = new FormData(); for (const file of files) formData.append('files', file); if (extraFields) for (const [key, value] of Object.entries(extraFields)) formData.append(key, value); const send = () => fetch(`${API_BASE}${endpoint}`, { method: 'POST', credentials: 'include', headers: { ...(getAccessToken() ? { Authorization: `Bearer ${getAccessToken()}` } : {}) }, body: formData }); try { let res = await send(); if (res.status === 401) { await useAuthStore.getState().refreshAccessToken(); res = await send() }; if (!res.ok) { const e = await res.json().catch(() => ({})); return { success: false, error: e.detail || `HTTP ${res.status}` } }; return { success: true, data: await res.json() } } catch (error) { return { success: false, error: String(error) } } }
 
 let isSyncing = false
 let syncErrors: string[] = []
@@ -87,50 +44,13 @@ const syncListeners: Set<(status: SyncStatus) => void> = new Set()
 function notifySyncListeners(pendingCount: number) { syncListeners.forEach(fn => fn({ isOnline: onlineStatus, isSyncing, pendingCount, lastSyncAt: null, errors: [...syncErrors] })) }
 export function onSyncStatusChange(listener: (status: SyncStatus) => void): () => void { syncListeners.add(listener); return () => syncListeners.delete(listener) }
 
-async function processSyncQueue(): Promise<{ processed: number; failed: number; remaining: number; conflicts: any[] }> {
-  if (isSyncing || !onlineStatus) return { processed: 0, failed: 0, remaining: 0, conflicts: [] }
-  isSyncing = true; syncErrors = []; let processed = 0; let failed = 0; const conflicts: any[] = []
-  try {
-    const pendingItems = await getPendingSyncItems(); notifySyncListeners(pendingItems.length)
-    if (!pendingItems.length) return { processed: 0, failed: 0, remaining: 0, conflicts: [] }
-    const operations = pendingItems.map(item => { const payload = JSON.parse(item.payload); return { operation_uuid: item.operationUuid, operation_type: item.operationType, entity_type: _mapEntityType(item.entityType), entity_id: _extractEntityId(payload, item), payload, device_timestamp: new Date(item.createdAt).toISOString() } })
-    const send = () => fetch(`${API_BASE}/sync/push`, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', ...(getAccessToken() ? { Authorization: `Bearer ${getAccessToken()}` } : {}) }, body: JSON.stringify({ operations }) })
-    let res = await send()
-    if (res.status === 401) { await useAuthStore.getState().refreshAccessToken(); res = await send() }
-    if (res.ok || res.status === 207) {
-      const data = await res.json()
-      for (const uuid of data.processed || []) { const item = pendingItems.find(i => i.operationUuid === uuid); if (item?.id) { await updateSyncQueueItem(item.id, { status: 'COMPLETED', processedAt: Date.now() }); processed++ } }
-      for (const conflict of data.conflicts || []) { const item = pendingItems.find(i => i.operationUuid === conflict.operation_uuid); if (item?.id) { await updateSyncQueueItem(item.id, { status: 'CONFLICT', lastError: `${conflict.conflict_type}: ${conflict.resolution_hint}`, serverData: conflict.server_value || null }); failed++ } conflicts.push(conflict); syncErrors.push(`${conflict.conflict_type}: ${conflict.resolution_hint}`) }
-      await clearCompletedSyncItems()
-    } else if (res.status === 409) {
-      const data = await res.json(); for (const conflict of data.conflicts || []) { const item = pendingItems.find(i => i.operationUuid === conflict.operation_uuid); if (item?.id) await updateSyncQueueItem(item.id, { status: 'CONFLICT', lastError: `${conflict.conflict_type}: ${conflict.resolution_hint}` }); failed++; conflicts.push(conflict); syncErrors.push(`BLOCKED: ${conflict.resolution_hint}`) }
-    } else {
-      for (const item of pendingItems) await updateSyncQueueItem(item.id!, { status: 'PENDING', retryCount: item.retryCount + 1, lastError: `HTTP ${res.status}` })
-    }
-  } catch (err) { syncErrors.push(String(err)) }
-  finally { isSyncing = false; notifySyncListeners(await getPendingSyncCount()) }
-  return { processed, failed, remaining: await getPendingSyncCount(), conflicts }
-}
+async function processSyncQueue(): Promise<{ processed: number; failed: number; remaining: number; conflicts: any[] }> { if (isSyncing || !onlineStatus) return { processed: 0, failed: 0, remaining: 0, conflicts: [] }; isSyncing = true; syncErrors = []; let processed = 0; let failed = 0; const conflicts: any[] = []; try { const pendingItems = await getPendingSyncItems(); notifySyncListeners(pendingItems.length); if (!pendingItems.length) return { processed: 0, failed: 0, remaining: 0, conflicts: [] }; const operations = pendingItems.map(item => { const payload = JSON.parse(item.payload); return { operation_uuid: item.operationUuid, operation_type: item.operationType, entity_type: _mapEntityType(item.entityType), entity_id: _extractEntityId(payload, item), payload, device_timestamp: new Date(item.createdAt).toISOString() } }); const send = () => fetch(`${API_BASE}/sync/push`, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', ...(getAccessToken() ? { Authorization: `Bearer ${getAccessToken()}` } : {}) }, body: JSON.stringify({ operations }) }); let res = await send(); if (res.status === 401) { await useAuthStore.getState().refreshAccessToken(); res = await send() }; if (res.ok || res.status === 207) { const data = await res.json(); for (const uuid of data.processed || []) { const item = pendingItems.find(i => i.operationUuid === uuid); if (item?.id) { await updateSyncQueueItem(item.id, { status: 'COMPLETED', processedAt: Date.now() }); processed++ } }; for (const conflict of data.conflicts || []) { const item = pendingItems.find(i => i.operationUuid === conflict.operation_uuid); if (item?.id) { await updateSyncQueueItem(item.id, { status: 'CONFLICT', lastError: `${conflict.conflict_type}: ${conflict.resolution_hint}`, serverData: conflict.server_value || null }); failed++ }; conflicts.push(conflict); syncErrors.push(`${conflict.conflict_type}: ${conflict.resolution_hint}`) }; await clearCompletedSyncItems() } else if (res.status === 409) { const data = await res.json(); for (const conflict of data.conflicts || []) { const item = pendingItems.find(i => i.operationUuid === conflict.operation_uuid); if (item?.id) await updateSyncQueueItem(item.id, { status: 'CONFLICT', lastError: `${conflict.conflict_type}: ${conflict.resolution_hint}` }); failed++; conflicts.push(conflict); syncErrors.push(`BLOCKED: ${conflict.resolution_hint}`) } } else { for (const item of pendingItems) await updateSyncQueueItem(item.id!, { status: 'PENDING', retryCount: item.retryCount + 1, lastError: `HTTP ${res.status}` }) } } catch (err) { syncErrors.push(String(err)) } finally { isSyncing = false; notifySyncListeners(await getPendingSyncCount()) }; return { processed, failed, remaining: await getPendingSyncCount(), conflicts } }
 
-export async function fullDataSync(orgId: string): Promise<{ success: boolean; synced: { projects: number; users: number; remarks: number; auditLogs: number; dictionaries: number }; errors: string[] }> {
-  const errors: string[] = []; const synced = { projects: 0, users: 0, remarks: 0, auditLogs: 0, dictionaries: 0 }
-  if (!onlineStatus) return { success: false, synced, errors: ['OFFLINE'] }
-  isSyncing = true; notifySyncListeners(0)
-  try {
-    const pull = await apiRequest<any>('/sync/pull', { method: 'POST', body: JSON.stringify({ last_sync_version: null }) })
-    if (pull.success) { for (const wo of pull.data?.bundle?.work_orders || []) await db.boqProgress.put({ id: `wo-${wo.id}`, orgId: String(wo.org_id), unitId: String(wo.project_id), boqItemId: `wo-${wo.id}`, completionPct: wo.completion_pct, status: wo.status, measuredQuantity: null, reworkFlag: wo.rework_flag, reworkReason: null, reworkAuthorizedBy: null, updatedBy: null, pendingSync: false, lastSyncedAt: Date.now() }); synced.projects = pull.data?.bundle?.work_orders?.length || 0 } else errors.push('sync/pull: ' + (pull.error || 'unknown'))
-    const [users, remarks, audit] = await Promise.all([apiRequest<any>('/auth/users'), apiRequest<any>('/quality/remarks'), apiRequest<any>('/auth/audit?page_size=100')])
-    if (users.success) synced.users = Array.isArray(users.data) ? users.data.length : users.data?.items?.length || 0; else errors.push('users: ' + (users.error || 'unknown'))
-    if (remarks.success) synced.remarks = Array.isArray(remarks.data) ? remarks.data.length : remarks.data?.items?.length || 0; else errors.push('remarks: ' + (remarks.error || 'unknown'))
-    if (audit.success) synced.auditLogs = Array.isArray(audit.data) ? audit.data.length : audit.data?.items?.length || 0; else errors.push('audit: ' + (audit.error || 'unknown'))
-    await processSyncQueue(); return { success: errors.length === 0, synced, errors }
-  } catch (err) { errors.push(String(err)); return { success: false, synced, errors } }
-  finally { isSyncing = false; notifySyncListeners(await getPendingSyncCount()) }
-}
+export async function fullDataSync(orgId: string): Promise<{ success: boolean; synced: { projects: number; users: number; remarks: number; auditLogs: number; dictionaries: number }; errors: string[] }> { const errors: string[] = []; const synced = { projects: 0, users: 0, remarks: 0, auditLogs: 0, dictionaries: 0 }; if (!onlineStatus) return { success: false, synced, errors: ['OFFLINE'] }; isSyncing = true; notifySyncListeners(0); try { const pull = await apiRequest<any>('/sync/pull', { method: 'POST', body: JSON.stringify({ last_sync_version: null }) }); if (pull.success) { for (const wo of pull.data?.bundle?.work_orders || []) await db.boqProgress.put({ id: `wo-${wo.id}`, orgId: String(wo.org_id), unitId: String(wo.project_id), boqItemId: `wo-${wo.id}`, completionPct: wo.completion_pct, status: wo.status, measuredQuantity: null, reworkFlag: wo.rework_flag, reworkReason: null, reworkAuthorizedBy: null, updatedBy: null, pendingSync: false, lastSyncedAt: Date.now() }); synced.projects = pull.data?.bundle?.work_orders?.length || 0 } else errors.push('sync/pull: ' + (pull.error || 'unknown')); const [users, remarks, audit] = await Promise.all([apiRequest<any>('/auth/users'), apiRequest<any>('/quality/remarks'), apiRequest<any>('/auth/audit?page_size=100')]); if (users.success) synced.users = Array.isArray(users.data) ? users.data.length : users.data?.items?.length || 0; else errors.push('users: ' + (users.error || 'unknown')); if (remarks.success) synced.remarks = Array.isArray(remarks.data) ? remarks.data.length : remarks.data?.items?.length || 0; else errors.push('remarks: ' + (remarks.error || 'unknown')); if (audit.success) synced.auditLogs = Array.isArray(audit.data) ? audit.data.length : audit.data?.items?.length || 0; else errors.push('audit: ' + (audit.error || 'unknown')); await processSyncQueue(); return { success: errors.length === 0, synced, errors } } catch (err) { errors.push(String(err)); return { success: false, synced, errors } } finally { isSyncing = false; notifySyncListeners(await getPendingSyncCount()) } }
 
 export async function getProjectsHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> { const r = await normalizedHybrid(apiRequest<any>(`/projects?org_id=${encodeURIComponent(orgId)}`)); if (r.success && r.data) { const raw = r.data.projects || r.data.items || r.data; const data = (Array.isArray(raw) ? raw : []).map((project: any) => ({ ...project, id: String(project.id), orgId: String(project.orgId ?? project.org_id ?? ''), totalUnits: Number(project.totalUnits ?? project.total_units ?? 0), completionPct: Number(project.completionPct ?? project.completion_pct ?? 0), isActive: project.isActive !== false, units: (Array.isArray(project.units) ? project.units : []).map((unit: any) => ({ ...unit, id: String(unit.id), projectId: String(unit.projectId ?? unit.project_id ?? project.id), completionPct: Number(unit.completionPct ?? unit.completion_pct ?? 0), boqItems: Array.isArray(unit.boqItems) ? unit.boqItems : [] })), assignments: Array.isArray(project.assignments) ? project.assignments : [] })); return { data, fromCache: false } } return { data: await getLocalProjects(), fromCache: true } }
 export async function getRemarksHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> { const r = await normalizedHybrid(apiRequest<any>('/quality/remarks')); if (r.success && r.data) return { data: Array.isArray(r.data.items) ? r.data.items : Array.isArray(r.data) ? r.data : [], fromCache: false }; return { data: await getLocalRemarks(), fromCache: true } }
-export async function getUsersHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> { const r = await normalizedHybrid(apiRequest<any>('/auth/users')); if (r.success && r.data) return { data: Array.isArray(r.data) ? r.data : Array.isArray(r.data.users) ? r.data.users : Array.isArray(r.data.items) ? r.data.items : [], fromCache: true } }
+export async function getUsersHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> { const r = await normalizedHybrid(apiRequest<any>('/auth/users')); if (r.success && r.data) return { data: Array.isArray(r.data) ? r.data : Array.isArray(r.data.users) ? r.data.users : Array.isArray(r.data.items) ? r.data.items : [], fromCache: false }; return { data: await getLocalUsers(), fromCache: true } }
 export async function getAuditLogsHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> { const r = await normalizedHybrid(apiRequest<any>('/auth/audit?page_size=100')); if (r.success && r.data) return { data: Array.isArray(r.data.items) ? r.data.items : Array.isArray(r.data) ? r.data : [], fromCache: false }; return { data: await getLocalAuditLogs(), fromCache: true } }
 export async function getDictionariesHybrid(orgId: string): Promise<{ data: any[]; fromCache: boolean }> { const r = await normalizedHybrid(apiRequest<any>(`/projects/dictionaries?org_id=${encodeURIComponent(orgId)}`)); if (r.success && r.data) return { data: Array.isArray(r.data.dictionaries) ? r.data.dictionaries : Array.isArray(r.data.items) ? r.data.items : Array.isArray(r.data) ? r.data : [], fromCache: false }; return { data: await getLocalDictionaries(), fromCache: true } }
 export async function getLocalProjects(): Promise<any[]> { const projects = await db.projects.toArray(); const result: any[] = []; for (const project of projects) { const units = await db.units.where('projectId').equals(project.id).toArray(); const unitsWithBoq: any[] = []; for (const unit of units) unitsWithBoq.push({ ...unit, boqItems: await db.boqItems.where('unitId').equals(unit.id).toArray() }); result.push({ ...project, units: unitsWithBoq }) } return result }
