@@ -1,6 +1,7 @@
 "use client"
 
 import { useRef, useState } from "react"
+import * as XLSX from "xlsx"
 import { Download, FileSpreadsheet, Loader2, Upload } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -23,6 +24,25 @@ function errorText(value: unknown): string {
     return lines.filter(Boolean).join("\n") || "فشل الاستيراد"
   }
   return "فشل الاستيراد"
+}
+
+function downloadTemplate(kind: ImportKind) {
+  const isUnits = kind === "units"
+  const headers = isUnits ? ["اسم الوحدة", "رمز الوحدة", "نوع الوحدة", "الطابق", "المساحة م²"] : ["الكود", "التصنيف", "التخصص", "وصف البند", "الكمية الإجمالية", "سعر الوحدة", "وحدة القياس", "التسلسل"]
+  const instructions = isUnits
+    ? [["الهدف", "إضافة وحدات المشروع دفعة واحدة."], ["المطلوب", "اسم الوحدة، رمز الوحدة، نوع الوحدة."], ["اختياري", "الطابق والمساحة م²."], ["مهم", "لا تضع بنود BOQ في ملف الوحدات."]]
+    : [["الهدف", "إضافة Master BOQ للمشروع؛ كل صف بند واحد على مستوى المشروع."], ["المطلوب", "التخصص، وصف البند، الكمية الإجمالية، وحدة القياس."], ["اختياري", "الكود، التصنيف، سعر الوحدة، التسلسل."], ["مهم", "لا تضع أسماء الوحدات/المستفيدين هنا. ربط BOQ بالوحدات يتم داخل FieldOps."]]
+  const wb = XLSX.utils.book_new()
+  const ws = XLSX.utils.aoa_to_sheet([headers])
+  ws['!cols'] = headers.map(h => ({ wch: Math.max(18, Math.min(34, h.length + 8)) }))
+  XLSX.utils.book_append_sheet(wb, ws, isUnits ? "Units" : "BOQ")
+  const info = XLSX.utils.aoa_to_sheet([["FieldOps V4 — تعليمات الاستيراد"], ...instructions])
+  info['!cols'] = [{ wch: 22 }, { wch: 90 }]
+  XLSX.utils.book_append_sheet(wb, info, "تعليمات")
+  const bytes = XLSX.write(wb, { bookType: "xlsx", type: "array" })
+  const blob = new Blob([bytes], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement("a"); a.href = url; a.download = isUnits ? "FieldOps_Units_Import_Template.xlsx" : "FieldOps_BOQ_Import_Template.xlsx"; a.click(); URL.revokeObjectURL(url)
 }
 
 export function ExcelImportPanel({ projectId, onImported }: { projectId: string; onImported?: () => void }) {
@@ -66,7 +86,7 @@ export function ExcelImportPanel({ projectId, onImported }: { projectId: string;
         return <div key={kind} className="rounded-lg border p-3 space-y-3">
           <div><div className="font-semibold">{units ? "استيراد الوحدات" : "استيراد جدول الكميات BOQ"}</div><div className="text-xs text-muted-foreground mt-1">{units ? "اسم الوحدة، الرمز، النوع، الطابق، المساحة." : "الكود، التصنيف، التخصص، الوصف، الكمية، السعر، وحدة القياس."}</div></div>
           <div className="flex flex-wrap gap-2">
-            <a href={units ? "/templates/FieldOps_Units_Import_Template.xlsx" : "/templates/FieldOps_BOQ_Import_Template.xlsx"} download className="inline-flex items-center justify-center gap-2 rounded-md border px-3 py-2 text-sm hover:bg-muted"><Download className="h-4 w-4" />تحميل النموذج</a>
+            <Button type="button" variant="outline" onClick={() => downloadTemplate(kind)} className="gap-2"><Download className="h-4 w-4" />تحميل النموذج</Button>
             <Button type="button" onClick={() => chooseFile(kind)} disabled={busy !== null} className="gap-2"><Upload className="h-4 w-4" />{busy === kind && <Loader2 className="h-4 w-4 animate-spin" />}رفع واستيراد</Button>
             <input ref={fileRefs[kind]} type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" className="hidden" onChange={e => onFile(kind, e.target.files?.[0])} />
           </div>
