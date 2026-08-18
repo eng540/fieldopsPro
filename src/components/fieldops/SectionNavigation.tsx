@@ -83,7 +83,7 @@ export const NAV_GROUPS: NavigationGroup[] = [
     description: 'الملاحظات والصور وبوابة الجودة',
     icon: ClipboardCheck,
     items: [
-      { id: 'quality', label: 'الجودة والأدلة', description: 'الملاحظات والصور والحل', icon: ClipboardCheck, badge: 'بوابة' },
+      { id: 'quality', label: 'مراقبة الجودة', description: 'الملاحظات والصور والحل', icon: ClipboardCheck, badge: 'بوابة' },
     ],
   },
   {
