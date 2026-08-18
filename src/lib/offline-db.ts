@@ -376,7 +376,7 @@ export async function savePhotoToLocal(remarkId: string, file: File): Promise<st
 
   // Add to sync queue
   await addToSyncQueue({
-    operationUuid: photoId,
+    operationUuid: newClientUuid(),
     entityType: 'photo',
     operationType: 'CREATE',
     endpoint: `/quality/remarks/${remarkId}/photos`,
@@ -470,15 +470,19 @@ export async function saveProgressOffline(
 
   // Add to sync queue
   await addToSyncQueue({
-    operationUuid: `op-${Date.now()}-${Math.random().toString(36).substring(7)}`,
+    operationUuid: newClientUuid(),
     entityType: 'boqProgress',
     operationType: 'UPDATE',
-    endpoint: '/execution/bulk-progress',
+    endpoint: '/execution/events',
     method: 'POST',
     payload: JSON.stringify({
-      orgId,
-      updates: [{ unitId, boqItemId, completionPct, reworkFlag, reworkReason, reworkAuthorizedBy }],
-      updatedBy: 'current-user',
+      unit_id: Number(unitId),
+      boq_item_id: Number(boqItemId),
+      completion_pct: completionPct,
+      rework_flag: reworkFlag,
+      rework_reason: reworkReason,
+      rework_authorized_by: reworkAuthorizedBy,
+      updated_by: 'current-user',
     }),
     maxRetries: 5,
   })
@@ -514,16 +518,25 @@ export async function saveBulkProgressOffline(
       })
     }
 
-    // Single bulk sync queue item
-    await addToSyncQueue({
-      operationUuid: `op-${now}-${Math.random().toString(36).substring(7)}`,
-      entityType: 'boqProgress',
-      operationType: 'BULK_PROGRESS',
-      endpoint: '/execution/bulk-progress',
-      method: 'POST',
-      payload: JSON.stringify({ orgId, updates, updatedBy }),
-      maxRetries: 5,
-    })
+    // Queue one operation per assignment so each result/conflict is observable and retryable.
+    for (const update of updates) {
+      await addToSyncQueue({
+        operationUuid: newClientUuid(),
+        entityType: 'boqProgress',
+        operationType: 'UPDATE',
+        endpoint: '/execution/events',
+        method: 'POST',
+        payload: JSON.stringify({
+          unit_id: Number(update.unitId),
+          boq_item_id: Number(update.boqItemId),
+          completion_pct: update.completionPct,
+          rework_flag: update.reworkFlag,
+          rework_reason: update.reworkReason || null,
+          updated_by: updatedBy,
+        }),
+        maxRetries: 5,
+      })
+    }
   })
 }
 
