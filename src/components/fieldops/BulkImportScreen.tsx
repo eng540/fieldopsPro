@@ -779,7 +779,7 @@ export function BulkImportScreen({ project, orgId, onRefresh }: BulkImportScreen
                     </SelectContent>
                   </Select>
                   <div className="text-xs text-gray-500 flex-1 truncate">
-                    معاينة: <span className="font-mono text-gray-700">{rawData[0]?.[header]?.substring(0, 40) || '—'}</span>
+                    معاينة: <span className="font-mono text-gray-700">{rawData[0]?.[header] == null || String(rawData[0][header]).trim() === '' ? '—' : String(rawData[0][header]).slice(0, 40)}</span>
                   </div>
                 </div>
               ))}
