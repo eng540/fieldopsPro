@@ -206,6 +206,13 @@ class BulkBoQProgressResponse(BaseModel):
     succeeded: int; failed: int; conflicts: list[BulkConflict]
 
 
+class ExecutionStateInitializationResponse(BaseModel):
+    project_id: int
+    assignment_count: int
+    initialized_count: int
+    existing_count: int
+
+
 class EventIntent(BaseModel):
     """Client event intent. unit_id is mandatory for BOQ_ITEM to avoid cross-unit ambiguity."""
     sync_uuid: str = Field(min_length=36, max_length=36)

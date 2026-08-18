@@ -13,7 +13,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { AlertTriangle, CheckCircle2, Loader2, Save, Search, RotateCcw } from 'lucide-react'
 import { useToast } from '@/hooks/use-toast'
 import { getExecutionState, listExecutionState, submitProgressEvent, queueProgressOffline } from '@/lib/execution-client'
-import { isOnline } from '@/lib/api-client'
+import { apiRequest, isOnline } from '@/lib/api-client'
 import { BulkExecutionActions } from './BulkExecutionActions'
 
 interface Props { project: any | null; orgId: string; onRefresh: () => void }
@@ -29,6 +29,7 @@ export function SpeedEntryGrid({ project, orgId, onRefresh }: Props) {
   const [executionStates, setExecutionStates] = useState<Record<string, { completion_pct: number; state_version: number }>>({})
   const [busy, setBusy] = useState(false)
   const [loadingState, setLoadingState] = useState(false)
+  const [initializingProject, setInitializingProject] = useState(false)
   const [rework, setRework] = useState<{ key: string; cell: Cell; next: number } | null>(null)
   const [reason, setReason] = useState('')
 
@@ -59,6 +60,21 @@ export function SpeedEntryGrid({ project, orgId, onRefresh }: Props) {
   }, [project?.id, toast])
 
   useEffect(() => { void loadExecutionStates() }, [loadExecutionStates])
+
+  const initializeProjectStates = async () => {
+    if (!project?.id || initializingProject) return
+    setInitializingProject(true)
+    try {
+      const result = await apiRequest<{ initialized_count: number; existing_count: number; assignment_count: number }>(`/execution/state/initialize-project?project_id=${project.id}`, { method: 'POST' })
+      await loadExecutionStates()
+      await onRefresh()
+      toast({ title: 'تمت تهيئة حالات التنفيذ', description: `تمت تهيئة ${result.initialized_count} حالة من أصل ${result.assignment_count} تعيين.` })
+    } catch (error) {
+      toast({ title: 'تعذر تهيئة حالات التنفيذ', description: error instanceof Error ? error.message : String(error), variant: 'destructive' })
+    } finally {
+      setInitializingProject(false)
+    }
+  }
 
   const keyFor = (unitId:number, boqId:number) => `${unitId}:${boqId}`
   const getCell = (u:any, b:any):Cell => { const key = keyFor(Number(u.id), Number(b.id)); if (drafts[key]) return drafts[key]; const state = executionStates[key]; const v = Number(state?.completion_pct ?? 0); return { unitId:Number(u.id), boqId:Number(b.id), value:v, original:v } }
@@ -116,7 +132,7 @@ export function SpeedEntryGrid({ project, orgId, onRefresh }: Props) {
 
   if (!project) return <Card className="border-dashed"><CardContent className="p-10 text-center text-gray-500">اختر مشروعاً لبدء الإدخال السريع</CardContent></Card>
   return <div className="space-y-3" dir="rtl">
-    <Alert><AlertTriangle className="h-4 w-4"/><AlertDescription>{loadingState ? 'جاري تحميل حالات التنفيذ...' : appliedPairCount === 0 ? 'لا توجد بنود مطبقة على الوحدات الحالية. طبّق بنود Master BOQ من إعداد المشروع قبل الإدخال؛ لن يتم إنشاء حقل إدخال لبند غير مطبق.' : missingStatePairCount > 0 ? `يوجد ${missingStatePairCount} تعيين بلا حالة تنفيذ. ستظهر كـ«تهيئة مطلوبة» ولن يسمح النظام بإدخالها حتى تهيئة الحالة.` : 'بنود المشروع معرفة مرة واحدة في BOQ. القيم في الجدول هي حالة تنفيذ البند لكل وحدة، وليست بنوداً مكررة.'}</AlertDescription></Alert>
+    <Alert><AlertTriangle className="h-4 w-4"/><AlertDescription><div className="flex flex-wrap items-center gap-2">{loadingState ? 'جاري تحميل حالات التنفيذ...' : appliedPairCount === 0 ? 'لا توجد بنود مطبقة على الوحدات الحالية. طبّق بنود Master BOQ من إعداد المشروع قبل الإدخال؛ لن يتم إنشاء حقل إدخال لبند غير مطبق.' : missingStatePairCount > 0 ? <><span>يوجد {missingStatePairCount} تعيين بلا حالة تنفيذ. ستظهر كـ«تهيئة مطلوبة» ولن يسمح النظام بإدخالها حتى تهيئة الحالة.</span><Button size="sm" variant="outline" disabled={initializingProject} onClick={initializeProjectStates}>{initializingProject ? <Loader2 className="h-4 w-4 ml-1 animate-spin"/> : null}{initializingProject ? 'جاري التهيئة...' : 'تهيئة الحالات'}</Button></> : 'بنود المشروع معرفة مرة واحدة في BOQ. القيم في الجدول هي حالة تنفيذ البند لكل وحدة، وليست بنوداً مكررة.'}</div></AlertDescription></Alert>
     <Card><CardContent className="p-3"><div className="flex flex-col lg:flex-row gap-2 lg:items-center"><div className="relative flex-1"><Search className="absolute right-3 top-2.5 h-4 w-4 text-gray-400"/><Input className="pr-9" value={search} onChange={e=>setSearch(e.target.value)} placeholder="بحث بالوحدة..."/></div><div className="flex gap-2 items-center"><Button variant="outline" onClick={toggleAll}>{selectedUnits.size===units.length&&units.length?'إلغاء تحديد الكل':'تحديد الكل'}</Button><Button onClick={saveAll} disabled={busy||loadingState||!dirtyCells.length}>{busy?<Loader2 className="h-4 w-4 ml-1 animate-spin"/>:<Save className="h-4 w-4 ml-1"/>}حفظ {dirtyCells.length?`(${dirtyCells.length})`:''}</Button></div></div><div className="flex flex-wrap gap-2 mt-2 text-xs text-gray-500"><Badge variant="outline">{units.length} وحدة</Badge><Badge variant="outline">{boqColumns.length} بند مشروع</Badge><Badge variant="outline">{selectedUnits.size} محدد</Badge><Badge variant="outline">{dirtyCells.length} غير محفوظ</Badge></div></CardContent></Card>
     <BulkExecutionActions units={units} selectedUnitIds={selectedUnits} onApply={applyBulk} disabled={busy||loadingState}/>
     <Card><CardHeader className="py-3"><CardTitle className="text-base">الوحدات × بنود المشروع — الإدخال السريع</CardTitle></CardHeader><CardContent className="p-0"><div className="overflow-auto max-h-[68vh]"><table className="w-full text-xs min-w-[900px] border-collapse"><thead className="sticky top-0 z-20 bg-white"><tr className="border-b"><th className="sticky right-0 z-30 bg-white p-2 w-10"><Checkbox checked={units.length>0&&selectedUnits.size===units.length} onCheckedChange={toggleAll}/></th><th className="sticky right-10 z-30 bg-white p-2 text-right min-w-[150px]">الوحدة</th>{boqColumns.map((b:any)=><th key={b.id} className="p-2 text-right min-w-[120px] border-r">{b.code||b.description||`BOQ #${b.id}`}<div className="text-[10px] text-gray-400">{b.unitOfMeasure||''}</div></th>)}</tr></thead><tbody>{units.map((u:any)=><tr key={u.id} className="border-b hover:bg-gray-50"><td className="sticky right-0 z-10 bg-white p-2"><Checkbox checked={selectedUnits.has(Number(u.id))} onCheckedChange={()=>toggleUnit(Number(u.id))}/></td><td className="sticky right-10 z-10 bg-white p-2 font-medium">{u.name}<div className="text-[10px] text-gray-400">{u.code||`#${u.id}`}</div></td>{boqColumns.map((b:any)=>{const exists=(u.boqItems||[]).some((x:any)=>Number(x.id)===Number(b.id));if(!exists)return <td key={b.id} title="هذا البند غير مطبق على الوحدة. طبّقه من إعداد المشروع قبل الإدخال." className="p-2 border-r text-center text-gray-400 text-[10px]">غير مطبق</td>;const state=executionStates[keyFor(Number(u.id),Number(b.id))];if(!state)return <td key={b.id} title="التعيين موجود لكن حالة التنفيذ غير مهيأة. شغّل التهيئة أو المزامنة قبل الإدخال." className="p-2 border-r text-center text-amber-700 text-[10px]">تهيئة مطلوبة</td>;const c=getCell(u,b);const dirty=c.value!==c.original;return <td key={b.id} className={`p-1 border-r ${dirty?'bg-amber-50':''}`}><div className="flex items-center gap-1"><Input className="h-8 w-20 text-center" type="number" min="0" max="100" value={c.value} onChange={e=>setCell(u,b,e.target.value)}/>{c.value>=100&&<CheckCircle2 className="h-3.5 w-3.5 text-green-600"/>}</div>{dirty&&<div className="text-[9px] text-amber-700 text-center mt-0.5">{c.original}% → {c.value}%</div>}</td>})}</tr>)}</tbody></table></div></CardContent></Card>
