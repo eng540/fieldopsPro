@@ -426,7 +426,8 @@ export function QualityScreen({ project, remarks, orgId, onRefresh }: QualityScr
             method: 'PATCH',
             body: JSON.stringify({ status: 'IN_REVIEW' }),
           })
-          if (!reviewResponse.success) throw new Error(reviewResponse.error || 'فشل نقل الملاحظة إلى قيد المراجعة')
+          const reviewAlreadyApplied = !reviewResponse.success && /already in status IN_REVIEW|RESOLVED -> IN_REVIEW|VERIFIED -> IN_REVIEW|CLOSED -> IN_REVIEW/.test(reviewResponse.error || '')
+          if (!reviewResponse.success && !reviewAlreadyApplied) throw new Error(reviewResponse.error || 'فشل نقل الملاحظة إلى قيد المراجعة')
         }
         const response = await apiRequest(`/quality/remarks/${resolveRemarkId}`, {
           method: 'PATCH',

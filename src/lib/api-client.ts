@@ -9,7 +9,7 @@ export interface ApiResponse<T = unknown> { success: boolean; data?: T; error?: 
 export interface SyncStatus { isOnline: boolean; isSyncing: boolean; pendingCount: number; lastSyncAt: number | null; errors: string[] }
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'
-const REQUEST_TIMEOUT_MS = 10_000
+const REQUEST_TIMEOUT_MS = 30_000
 function getAccessToken(): string | null { return useAuthStore.getState().tokens?.accessToken || null }
 function snakeToCamelKey(key: string): string { return key.replace(/_([a-zA-Z0-9])/g, (_, char: string) => char.toUpperCase()) }
 function normalizeApiData<T>(value: T): T {
