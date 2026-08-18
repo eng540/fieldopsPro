@@ -32,6 +32,7 @@ import {
   Eye,
 } from 'lucide-react'
 import { savePhotoToLocal, getPhotosForRemark, getPendingPhotos, type LocalPhoto, db } from '@/lib/offline-db'
+import { uploadPhotosToServer } from '@/lib/api-client'
 import { useToast } from '@/hooks/use-toast'
 import { useOnlineStatus } from '@/lib/sync-hooks'
 
@@ -169,33 +170,40 @@ export function MediaUploadPanel({ remarkId, orgId, onUploadComplete }: MediaUpl
       setUploading(true)
       setUploadProgress(0)
 
-      let savedCount = 0
+      let completedCount = 0
+      let failedCount = 0
 
       for (const file of imageFiles) {
         try {
-          await savePhotoToLocal(remarkId, file)
-          savedCount++
-          setUploadProgress(Math.round((savedCount / imageFiles.length) * 100))
+          if (isOnline) {
+            const result = await uploadPhotosToServer(remarkId, [file])
+            completedCount += result.uploaded
+          } else {
+            await savePhotoToLocal(remarkId, file)
+            completedCount++
+          }
+          setUploadProgress(Math.round(((completedCount + failedCount) / imageFiles.length) * 100))
         } catch {
+          failedCount++
           toast({
             title: 'خطأ في الرفع',
-            description: `فشل حفظ الصورة: ${file.name}`,
+            description: `فشل رفع الصورة: ${file.name}`,
             variant: 'destructive',
           })
+          setUploadProgress(Math.round(((completedCount + failedCount) / imageFiles.length) * 100))
         }
       }
 
       setUploading(false)
       setUploadProgress(0)
 
-      if (savedCount > 0) {
+      if (completedCount > 0) {
         toast({
-          title: 'تم الحفظ',
+          title: isOnline ? 'تم الرفع من الخادم' : 'تم الحفظ محلياً',
           description: isOnline
-            ? `تم رفع ${savedCount} صورة بنجاح`
-            : `تم حفظ ${savedCount} صورة محلياً — ستُرفع عند الاتصال`,
+            ? `تم تأكيد رفع ${completedCount} صورة من الخادم${failedCount ? `، وفشل ${failedCount}` : ''}`
+            : `تم حفظ ${completedCount} صورة محلياً — ستُرفع عند الاتصال${failedCount ? `، وفشل ${failedCount}` : ''}`,
         })
-
         await loadPhotos()
         onUploadComplete?.()
       }

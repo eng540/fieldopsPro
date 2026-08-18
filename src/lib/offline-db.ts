@@ -595,17 +595,29 @@ export async function saveRemarkOffline(
   return remarkId
 }
 
-export async function resolveRemarkOffline(remarkId: string, resolutionNotes: string): Promise<void> {
+export async function resolveRemarkOffline(remarkId: string, resolutionNotes: string, currentStatus = 'IN_REVIEW'): Promise<void> {
   const now = Date.now()
   const existing = await db.remarks.get(remarkId)
   if (existing) {
     await db.remarks.put({ ...existing, status: 'RESOLVED', resolutionNotes, pendingSync: true, lastSyncedAt: now })
   }
+  const endpoint = `/quality/remarks/${remarkId}`
+  if (currentStatus === 'OPEN') {
+    await addToSyncQueue({
+      operationUuid: newClientUuid(),
+      entityType: 'remark',
+      operationType: 'UPDATE',
+      endpoint,
+      method: 'PATCH',
+      payload: JSON.stringify({ status: 'IN_REVIEW' }),
+      maxRetries: 3,
+    })
+  }
   await addToSyncQueue({
     operationUuid: newClientUuid(),
     entityType: 'remark',
     operationType: 'UPDATE',
-    endpoint: `/quality/remarks/${remarkId}`,
+    endpoint,
     method: 'PATCH',
     payload: JSON.stringify({ status: 'RESOLVED', resolution_notes: resolutionNotes }),
     maxRetries: 3,

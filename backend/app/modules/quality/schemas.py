@@ -59,10 +59,19 @@ class RemarkStatusUpdate(BaseModel):
         return value.strip() if value else value
 
 
+class RemarkUnitSummary(BaseModel):
+    id: int
+    name: str
+    code: str
+    project_id: int
+    unit_type: str | None = None
+
+
 class RemarkRead(BaseModel):
     id: str
     org_id: int
     unit_id: int
+    unit: RemarkUnitSummary | None = None
     work_order_id: int | None
     template_id: int | None
     custom_issue: str | None
