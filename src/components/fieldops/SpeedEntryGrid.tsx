@@ -65,7 +65,9 @@ export function SpeedEntryGrid({ project, orgId, onRefresh }: Props) {
     if (!project?.id || initializingProject) return
     setInitializingProject(true)
     try {
-      const result = await apiRequest<{ initialized_count: number; existing_count: number; assignment_count: number }>(`/execution/state/initialize-project?project_id=${project.id}`, { method: 'POST' })
+      const response = await apiRequest<{ initialized_count: number; existing_count: number; assignment_count: number }>(`/execution/state/initialize-project?project_id=${project.id}`, { method: 'POST' })
+      if (!response.success || !response.data) throw new Error(response.error || 'تعذر تهيئة حالات التنفيذ')
+      const result = response.data
       await loadExecutionStates()
       await onRefresh()
       toast({ title: 'تمت تهيئة حالات التنفيذ', description: `تمت تهيئة ${result.initialized_count} حالة من أصل ${result.assignment_count} تعيين.` })
