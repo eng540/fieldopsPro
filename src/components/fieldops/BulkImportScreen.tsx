@@ -23,6 +23,7 @@ import {
   AlertCircle, WifiOff, FileText, Sheet, RefreshCw, Trash2, Eye
 } from 'lucide-react'
 import { db as offlineDb } from '@/lib/offline-db'
+import { uploadMultipart } from '@/lib/api-client'
 
 // ============================================================
 // Types
@@ -61,8 +62,17 @@ interface RowError {
 interface ImportSummary {
   created: number
   updated: number
+  skipped: number
   errors: RowError[]
   total: number
+}
+
+interface UnitImportResponse {
+  imported: number
+  skipped: number
+  created_codes?: string[]
+  skipped_codes?: string[]
+  message?: string
 }
 
 // ============================================================
@@ -311,172 +321,42 @@ export function BulkImportScreen({ project, orgId, onRefresh }: BulkImportScreen
   // ============================================================
 
   const handleImport = useCallback(async () => {
-    if (!project) return
+    if (!project || !file) return
 
     setStep('importing')
-    setImportProgress(0)
+    setImportProgress(10)
     setRowErrors([])
     setSavedLocally(false)
 
-    const mappedData = rawData.map(row => {
-      const mapped: Record<string, string> = {}
-      Object.entries(columnMapping).forEach(([excelCol, systemField]) => {
-        if (systemField) mapped[systemField] = row[excelCol] || ''
-      })
-      return mapped
-    })
-
-    const totalRows = mappedData.length
-    let created = 0
-    let updated = 0
-    const errors: RowError[] = []
-
-    // Group rows by unit code
-    const unitGroups: Record<string, typeof mappedData> = {}
-    mappedData.forEach((row, idx) => {
-      const unitCode = row.unitCode || ''
-      if (!unitCode) {
-        errors.push({ row: idx + 1, message: 'رمز الوحدة مفقود' })
-        return
-      }
-      if (!unitGroups[unitCode]) unitGroups[unitCode] = []
-      unitGroups[unitCode].push(row)
-    })
-
-    // Try to save locally first (offline support)
-    try {
-      for (const [unitCode, rows] of Object.entries(unitGroups)) {
-        const firstRow = rows[0]
-        const unitId = `unit-import-${Date.now()}-${unitCode.replace(/\s+/g, '-')}`
-
-        // Save unit to offline DB
-        await offlineDb.units.put({
-          id: unitId,
-          orgId,
-          projectId: project.id,
-          name: firstRow.unitName || unitCode,
-          code: unitCode,
-          unitType: firstRow.unitType || 'RESIDENTIAL',
-          floor: firstRow.floor || null,
-          areaSqm: firstRow.areaSqm ? parseFloat(firstRow.areaSqm) : null,
-          status: 'NOT_STARTED',
-          completionPct: 0,
-          lastSyncedAt: Date.now(),
-        })
-
-        // Save BoQ items to offline DB
-        for (const r of rows) {
-          await offlineDb.boqItems.put({
-            id: `boq-import-${Date.now()}-${Math.random().toString(36).substring(7)}`,
-            orgId,
-            unitId,
-            trade: r.trade || '',
-            description: r.description || '',
-            quantity: parseFloat(r.quantity) || 0,
-            unitOfMeasure: r.unitOfMeasure || 'UNIT',
-            completionPct: parseFloat(r.completionPct) || 0,
-            lastSyncedAt: Date.now(),
-          })
-        }
-      }
-      setSavedLocally(true)
-    } catch (err) {
-      console.warn('Local save warning:', err)
+    const extension = file.name.split('.').pop()?.toLowerCase()
+    if (extension !== 'xlsx') {
+      const message = 'اعتماد Excel عبر الخادم يتطلب ملف .xlsx؛ احفظ الملف بهذه الصيغة ثم أعد الرفع.'
+      const errors = [{ row: 1, message }]
+      setImportSummary({ created: 0, updated: 0, skipped: 0, errors, total: rawData.length })
+      setRowErrors(errors)
+      setStep('summary')
+      return
     }
 
-    // Process each unit group
-    const unitCodes = Object.keys(unitGroups)
-    for (let i = 0; i < unitCodes.length; i++) {
-      const unitCode = unitCodes[i]
-      const rows = unitGroups[unitCode]
-      const firstRow = rows[0]
-
-      try {
-        // Check if unit already exists
-        const existingUnit = project.units?.find(u => u.code === unitCode)
-
-        if (existingUnit) {
-          // Add BoQ items to existing unit
-          for (const row of rows) {
-            const boqPayload = {
-              orgId,
-              unitId: existingUnit.id,
-              trade: row.trade || '',
-              description: row.description || '',
-              quantity: parseFloat(row.quantity) || 0,
-              unitOfMeasure: row.unitOfMeasure || 'UNIT',
-              completionPct: parseFloat(row.completionPct) || 0,
-            }
-
-            try {
-              const res = await fetch('/api/units', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ boqItem: boqPayload }),
-              })
-              if (res.ok) {
-                updated++
-              } else {
-                const errData = await res.json().catch(() => ({}))
-                errors.push({ row: i + 1, message: errData.error || `فشل إضافة بند لوحدة ${unitCode}` })
-              }
-            } catch {
-              errors.push({ row: i + 1, message: `خطأ شبكة لوحدة ${unitCode}` })
-            }
-          }
-        } else {
-          // Create new unit with BoQ items
-          const unitPayload = {
-            orgId,
-            projectId: project.id,
-            name: firstRow.unitName || unitCode,
-            code: unitCode,
-            unitType: firstRow.unitType || 'RESIDENTIAL',
-            floor: firstRow.floor || null,
-            areaSqm: firstRow.areaSqm ? parseFloat(firstRow.areaSqm) : null,
-            boqItems: rows.map(r => ({
-              trade: r.trade || '',
-              description: r.description || '',
-              quantity: parseFloat(r.quantity) || 0,
-              unitOfMeasure: r.unitOfMeasure || 'UNIT',
-              completionPct: parseFloat(r.completionPct) || 0,
-            })),
-          }
-
-          try {
-            const res = await fetch('/api/units', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ unit: unitPayload }),
-            })
-            if (res.ok) {
-              created++
-            } else {
-              const errData = await res.json().catch(() => ({}))
-              errors.push({ row: i + 1, message: errData.error || `فشل إنشاء وحدة ${unitCode}` })
-            }
-          } catch {
-            errors.push({ row: i + 1, message: `خطأ شبكة لوحدة ${unitCode}` })
-          }
-        }
-      } catch (err) {
-        errors.push({ row: i + 1, message: `خطأ غير متوقع: ${String(err)}` })
-      }
-
-      // Update progress
-      setImportProgress(Math.round(((i + 1) / unitCodes.length) * 100))
+    const result = await uploadMultipart<UnitImportResponse>(`/projects/${encodeURIComponent(project.id)}/import/units`, file)
+    if (result.success && result.data) {
+      const imported = Number(result.data.imported || 0)
+      const skipped = Number(result.data.skipped || 0)
+      setImportProgress(100)
+      setImportSummary({ created: imported, updated: 0, skipped, errors: [], total: rawData.length })
+      setStep('summary')
+      toast({ title: 'تم اعتماد استيراد الوحدات', description: result.data.message || `تم إنشاء ${imported} وحدة وتجاوز ${skipped} مطابقة.` })
+      onRefresh()
+      return
     }
 
-    setImportSummary({
-      created,
-      updated,
-      errors,
-      total: totalRows,
-    })
+    const message = result.error || 'فشل اعتماد ملف Excel عبر الخادم.'
+    const errors = [{ row: 1, message }]
+    setImportProgress(100)
+    setImportSummary({ created: 0, updated: 0, skipped: 0, errors, total: rawData.length })
     setRowErrors(errors)
     setStep('summary')
-    onRefresh()
-  }, [project, orgId, rawData, columnMapping, onRefresh])
+  }, [project, file, rawData.length, onRefresh, toast])
 
   // ============================================================
   // Download Template
@@ -915,7 +795,7 @@ export function BulkImportScreen({ project, orgId, onRefresh }: BulkImportScreen
       {step === 'summary' && importSummary && (
         <div className="space-y-6">
           {/* Summary Cards */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
             <Card className="border-emerald-200 bg-emerald-50/50">
               <CardContent className="p-4 text-center">
                 <div className="w-10 h-10 bg-emerald-100 rounded-lg flex items-center justify-center mx-auto mb-2">
@@ -933,6 +813,16 @@ export function BulkImportScreen({ project, orgId, onRefresh }: BulkImportScreen
                 </div>
                 <p className="text-2xl font-bold text-blue-800">{importSummary.updated}</p>
                 <p className="text-xs text-blue-600 font-medium">بند مُحدّث</p>
+              </CardContent>
+            </Card>
+
+            <Card className="border-amber-200 bg-amber-50/50">
+              <CardContent className="p-4 text-center">
+                <div className="w-10 h-10 bg-amber-100 rounded-lg flex items-center justify-center mx-auto mb-2">
+                  <Check className="w-5 h-5 text-amber-600" />
+                </div>
+                <p className="text-2xl font-bold text-amber-800">{importSummary.skipped}</p>
+                <p className="text-xs text-amber-600 font-medium">متجاوز مطابق</p>
               </CardContent>
             </Card>
 
