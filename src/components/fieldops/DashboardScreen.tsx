@@ -5,7 +5,7 @@ import { motion } from 'framer-motion'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import {
-  Building2, Grid3X3, TrendingUp, AlertTriangle, Users, Zap, Camera,
+  Building2, Grid3X3, TrendingUp, AlertTriangle, Users, Camera,
   FileSpreadsheet, Activity, ArrowLeft, Clock, CheckCircle2,
   WifiOff, Wifi, BarChart3, MapPin, Shield,
 } from 'lucide-react'
@@ -501,49 +501,6 @@ function RemarksBySeverity({ remarks }: { remarks: RemarkData[] }) {
   )
 }
 
-function QuickActions({ onNavigate }: { onNavigate: (tab: string) => void }) {
-  const actions = [
-    { icon: Building2, label: 'المشاريع', tab: 'projects', color: 'bg-emerald-50 text-emerald-600 hover:bg-emerald-100' },
-    { icon: Grid3X3, label: 'إدخال الإنجاز', tab: 'speed-entry', color: 'bg-amber-50 text-amber-600 hover:bg-amber-100' },
-    { icon: Camera, label: 'الجودة والصور', tab: 'quality', color: 'bg-blue-50 text-blue-600 hover:bg-blue-100' },
-    { icon: AlertTriangle, label: 'الملاحظات', tab: 'quality', color: 'bg-red-50 text-red-600 hover:bg-red-100' },
-    { icon: Users, label: 'المستخدمون', tab: 'users', color: 'bg-purple-50 text-purple-600 hover:bg-purple-100' },
-    { icon: FileSpreadsheet, label: 'القواميس', tab: 'dictionary', color: 'bg-cyan-50 text-cyan-600 hover:bg-cyan-100' },
-    { icon: Activity, label: 'أوامر العمل', tab: 'work-orders', color: 'bg-teal-50 text-teal-600 hover:bg-teal-100' },
-    { icon: Shield, label: 'الحوكمة', tab: 'governance', color: 'bg-indigo-50 text-indigo-600 hover:bg-indigo-100' },
-  ]
-
-  return (
-    <motion.div variants={itemVariants}>
-      <Card className="border-0 shadow-md h-full">
-        <CardHeader className="pb-3">
-          <div className="flex items-center gap-2">
-            <Zap className="w-4 h-4 text-amber-600" />
-            <CardTitle className="text-base">إجراءات سريعة</CardTitle>
-          </div>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            {actions.map((action, i) => (
-              <motion.button
-                key={action.tab}
-                initial={{ opacity: 0, scale: 0.9 }}
-                animate={{ opacity: 1, scale: 1 }}
-                transition={{ delay: i * 0.05, duration: 0.3 }}
-                onClick={() => onNavigate(action.tab)}
-                className={`flex flex-col items-center gap-2 p-3 rounded-xl transition-all duration-200 ${action.color}`}
-              >
-                <action.icon className="w-5 h-5" />
-                <span className="text-xs font-medium">{action.label}</span>
-              </motion.button>
-            ))}
-          </div>
-        </CardContent>
-      </Card>
-    </motion.div>
-  )
-}
-
 function RecentActivity({ auditLogs }: { auditLogs: AuditLogData[] }) {
   const recentLogs = auditLogs.slice(0, 5)
 
@@ -879,9 +836,6 @@ export function DashboardScreen({
           <RemarksBySeverity remarks={displayRemarks} />
         </div>
       </motion.div>
-
-      {/* Quick Actions */}
-      <QuickActions onNavigate={onNavigate} />
 
       {/* Bottom Row: Trade Completion + Recent Activity */}
       <motion.div variants={containerVariants} initial="hidden" animate="visible">
