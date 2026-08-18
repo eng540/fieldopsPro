@@ -16,7 +16,7 @@ import { OperationalWorkflowRail } from '@/components/fieldops/OperationalWorkfl
 import { ProjectCreationDialog } from '@/components/projects/ProjectCreationDialog'
 import { MobileSectionNav, SectionSidebar, WorkspaceBreadcrumb, getAllowedNavigation } from '@/components/fieldops/SectionNavigation'
 
-const ScreenFallback = () => <div className="flex flex-col items-center justify-center h-[60vh] text-emerald-600"><Loader2 className="w-8 h-8 animate-spin mb-4" /><p className="text-sm font-medium text-gray-500">جاري تحميل الشاشة...</p></div>
+const ScreenFallback = () => <div className="flex min-h-[280px] flex-col items-center justify-center rounded-2xl border border-slate-100 bg-white text-emerald-600" role="status" aria-live="polite"><Loader2 className="w-7 h-7 animate-spin mb-3" /><p className="text-sm font-semibold text-slate-700">جارٍ فتح القسم...</p><p className="mt-1 text-xs text-slate-400">يتم تجهيز العرض والبيانات الخاصة بهذه الشاشة.</p></div>
 const DashboardScreen = dynamic(() => import('@/components/fieldops/DashboardScreen').then(mod => mod.DashboardScreen), { loading: ScreenFallback })
 const ProjectsScreen = dynamic(() => import('@/components/fieldops/ProjectsScreen').then(mod => mod.ProjectsScreen), { loading: ScreenFallback })
 const SpeedEntryGrid = dynamic(() => import('@/components/fieldops/SpeedEntryGrid').then(mod => mod.SpeedEntryGrid), { loading: ScreenFallback })
@@ -60,6 +60,7 @@ export default function FieldOpsApp() {
   const [orgId, setOrgId] = useState('demo')
   const [dataLoading, setDataLoading] = useState(false)
   const [dataLoadError, setDataLoadError] = useState<string | null>(null)
+  const [dataBootstrapped, setDataBootstrapped] = useState(false)
   const [conflicts, setConflicts] = useState<SyncQueueItem[]>([])
   const [projects, setProjects] = useState<ProjectData[]>([])
   const [selectedProject, setSelectedProject] = useState<ProjectData | null>(null)
@@ -88,7 +89,7 @@ export default function FieldOpsApp() {
       if (e.data) setDictionaries(e.data)
       const pending = await getPendingSyncItems()
       setConflicts(pending.filter(i => i.status === 'CONFLICT' || i.status === 'FAILED'))
-    } catch (err: any) { console.error('[FieldOps Bootstrap] data load failed', err); setDataLoadError(err?.message || 'تعذر تحميل بيانات المشروع') } finally { setDataLoading(false) }
+    } catch (err: any) { console.error('[FieldOps Bootstrap] data load failed', err); setDataLoadError(err?.message || 'تعذر تحميل بيانات المشروع') } finally { setDataLoading(false); setDataBootstrapped(true) }
   }, [isAuthenticated, orgId])
 
   useEffect(() => { void registerServiceWorker() }, [])
@@ -112,6 +113,8 @@ export default function FieldOpsApp() {
   if (!isMounted || !isHydrated || isInitializing) return <BootstrapFallback message="جاري تهيئة جلسة FieldOps..." detail="يتم أولاً التحقق من المصادقة ثم يبدأ تحميل بيانات المشروع. إذا تعذر الاتصال ستظهر رسالة خطأ بدلاً من استمرار التحميل." />
   if (authError && !isAuthenticated) return <BootstrapFallback message="تعذر استعادة جلسة المصادقة" detail={authError} onRetry={() => void bootstrapAuth()} />
   if (!isAuthenticated) return null
+  if (!dataBootstrapped) return <BootstrapFallback message="جاري تحميل مساحة العمل..." detail="ننتظر اكتمال المشاريع والوحدات وحالات التنفيذ قبل عرض الأرقام أو إتاحة الإدخال." />
+  if (dataLoadError && !projects.length) return <BootstrapFallback message="تعذر تحميل بيانات مساحة العمل" detail={dataLoadError} onRetry={() => void loadAllData()} />
 
   const wrap = (name: string, node: React.ReactNode) => <ScreenErrorBoundary screenName={name}>{node}</ScreenErrorBoundary>
   const workflow = <OperationalWorkflowRail project={selectedProject} remarks={remarks} online={isOnline} pendingCount={conflicts.length} onNavigate={navigate}/>
