@@ -762,14 +762,14 @@ export function BulkImportScreen({ project, orgId, onRefresh }: BulkImportScreen
                   </div>
                   <ArrowLeft className="w-4 h-4 text-gray-400 flex-shrink-0" />
                   <Select
-                    value={columnMapping[header] || ''}
-                    onValueChange={val => setColumnMapping(prev => ({ ...prev, [header]: val }))}
+                    value={columnMapping[header] || '__skip__'}
+                    onValueChange={val => setColumnMapping(prev => ({ ...prev, [header]: val === '__skip__' ? '' : val }))}
                   >
                     <SelectTrigger className="w-48">
                       <SelectValue placeholder="اختر حقل النظام" />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="">— تخطي —</SelectItem>
+                      <SelectItem value="__skip__">— تخطي —</SelectItem>
                       {SYSTEM_FIELDS.map(field => (
                         <SelectItem key={field.key} value={field.key}>
                           {field.label}

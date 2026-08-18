@@ -37,6 +37,7 @@ from app.modules.execution.schemas import (
     EventBatchRequest,
     EventBatchResponse,
     EventIntent,
+    ExecutionStateInitializationResponse,
 )
 from app.modules.execution.service import (
     BusinessRuleError,
@@ -45,6 +46,7 @@ from app.modules.execution.service import (
     process_event_intent,
 )
 from app.modules.iam.dependencies import get_current_user
+from app.modules.projects.models import ProjectUnit, UnitBoQAssignment
 
 _REWORK_AUTHORIZED_ROLES = {"PROJECT_MANAGER", "ORG_ADMIN", "SUPER_ADMIN"}
 router = APIRouter()
@@ -171,6 +173,57 @@ async def submit_events(request: EventBatchRequest, db: AsyncSession = Depends(g
         except Exception:
             failed.append({"sync_uuid": intent.sync_uuid, "error": "Event processing failed"})
     return EventBatchResponse(succeeded=succeeded, conflicts=conflicts, failed=failed)
+
+
+@router.post("/state/initialize-project", response_model=ExecutionStateInitializationResponse)
+async def initialize_project_execution_state(
+    project_id: int = Query(..., gt=0),
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+) -> ExecutionStateInitializationResponse:
+    """Idempotently create INITIAL_STATE for active assignments in one project."""
+    if current_user.get("role") == "VIEWER":
+        raise HTTPException(status_code=403, detail="VIEWER cannot initialize execution state")
+    org_id, user_id = current_user["org_id"], current_user["id"]
+    assignments = (await db.execute(
+        select(UnitBoQAssignment)
+        .join(ProjectUnit, ProjectUnit.id == UnitBoQAssignment.unit_id)
+        .where(
+            UnitBoQAssignment.org_id == org_id,
+            ProjectUnit.org_id == org_id,
+            ProjectUnit.project_id == project_id,
+            UnitBoQAssignment.is_active.is_(True),
+        )
+        .order_by(UnitBoQAssignment.unit_id, UnitBoQAssignment.boq_item_id)
+    )).scalars().all()
+    initialized_count = 0
+    existing_count = 0
+    for assignment in assignments:
+        state = (await db.execute(
+            select(UnitBoQProgress).where(
+                UnitBoQProgress.org_id == org_id,
+                UnitBoQProgress.unit_id == assignment.unit_id,
+                UnitBoQProgress.boq_item_id == assignment.boq_item_id,
+            ).with_for_update()
+        )).scalar_one_or_none()
+        if state is not None:
+            existing_count += 1
+            continue
+        await initialize_boq_state(
+            db,
+            org_id=org_id,
+            unit_id=assignment.unit_id,
+            boq_item_id=assignment.boq_item_id,
+            user_id=user_id,
+        )
+        initialized_count += 1
+    await db.flush()
+    return ExecutionStateInitializationResponse(
+        project_id=project_id,
+        assignment_count=len(assignments),
+        initialized_count=initialized_count,
+        existing_count=existing_count,
+    )
 
 
 @router.get("/events/history")

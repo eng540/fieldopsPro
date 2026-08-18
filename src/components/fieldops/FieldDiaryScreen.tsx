@@ -9,6 +9,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { useToast } from '@/hooks/use-toast'
 import { listDiary, saveDiary, type DiaryEntry } from '@/lib/legacy-capabilities-api'
+import { saveDiaryOffline } from '@/lib/offline-db'
 
 const DRAFT_PREFIX = 'fieldops-diary-draft:'
 const DRAFT_META_PREFIX = 'fieldops-diary-meta:'
@@ -182,7 +183,16 @@ export function FieldDiaryScreen({ projectId, projectName, onChanged }: { projec
     }
     setSaving(true)
     try {
-      if (!online) throw new Error('OFFLINE')
+      if (!online) {
+        await saveDiaryOffline(payload)
+        if (draftKey) localStorage.removeItem(draftKey)
+        if (draftMetaKey) localStorage.removeItem(draftMetaKey)
+        setHasDraft(false)
+        setDraftSavedAt(null)
+        setForm(initialForm())
+        toast({ title: 'تمت إضافة اليومية إلى طابور المزامنة', description: 'ستُرسل تلقائياً عند عودة الاتصال.' })
+        return
+      }
       await saveDiary(payload)
       if (draftKey) localStorage.removeItem(draftKey)
       if (draftMetaKey) localStorage.removeItem(draftMetaKey)
@@ -202,7 +212,7 @@ export function FieldDiaryScreen({ projectId, projectName, onChanged }: { projec
         }
         setHasDraft(true)
       } catch { /* best effort */ }
-      toast({ title: 'تم حفظ المسودة محلياً', description: online ? 'تعذر الوصول للخادم. لم تُفقد البيانات ويمكن إعادة المحاولة.' : 'أنت غير متصل. ستبقى البيانات على الجهاز حتى تعود للاتصال.', variant: 'destructive' })
+      toast({ title: 'تم حفظ المسودة محلياً', description: 'تعذر الوصول للخادم. لم تُفقد البيانات ويمكن إعادة المحاولة.', variant: 'destructive' })
     } finally {
       setSaving(false)
     }

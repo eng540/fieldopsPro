@@ -37,6 +37,7 @@ const ENTITY_TYPE_AR: Record<SyncQueueItem['entityType'], string> = {
   unit: 'وحدة',
   boqProgress: 'تقدم الكميات',
   remark: 'ملاحظة',
+  diary: 'يومية',
   photo: 'صورة',
   user: 'مستخدم',
   dictionary: 'قاموس',

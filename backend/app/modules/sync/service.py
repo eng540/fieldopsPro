@@ -19,7 +19,7 @@ Constitutional (ADR-002):
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
 from uuid import uuid4
 
@@ -40,7 +40,8 @@ from app.modules.execution.models import (
     SyncOperationType as ModelSyncOpType,
     SyncStatus,
 )
-from app.modules.quality.models import Remark, RemarkStatus
+from app.modules.quality.models import Remark, RemarkStatus, RemarkStatusEvent, REMARK_STATUS_TRANSITIONS
+from app.modules.field_diary.models import FieldDiaryEntry
 from app.modules.projects.models import UnitBoQAssignment
 from app.modules.execution.schemas import EventIntent
 from app.modules.execution.service import BusinessRuleError, ConcurrentModificationError, initialize_boq_state, process_event_intent
@@ -209,16 +210,7 @@ async def push_sync(
             elif entity_type == "REMARK":
                 result = await _process_remark(db, op, org_id, user_id, server_now)
             elif entity_type == "DAILY_LOG":
-                # DAILY_LOG not yet implemented — POLICY_BLOCK
-                conflicts.append(SyncConflict(
-                    operation_uuid=uuid,
-                    conflict_type=SyncConflictType.POLICY_BLOCK,
-                    server_value={},
-                    client_value={"entity_type": "DAILY_LOG"},
-                    resolution_hint="DAILY_LOG entity type is not yet supported by the sync engine.",
-                ))
-                await _register_sync_log(db, uuid, op, org_id, user_id, SyncStatus.FAILED, 0)
-                continue
+                result = await _process_daily_log(db, op, org_id, user_id, server_now)
             else:
                 conflicts.append(SyncConflict(
                     operation_uuid=uuid,
@@ -618,12 +610,49 @@ async def _process_remark(
     # For REMARK, entity_id is the UUID of the remark itself
     remark_id = op.entity_id
 
-    # Check if remark already exists (idempotent — append-only)
-    existing = await db.execute(
-        select(Remark).where(Remark.id == remark_id)
-    )
-    if existing.scalar_one_or_none():
-        # Already exists — idempotent success (append-only)
+    # A CREATE for an existing remark is idempotent; UPDATE is used for lifecycle resolution.
+    existing = await db.execute(select(Remark).where(Remark.id == remark_id, Remark.org_id == org_id).with_for_update())
+    existing_remark = existing.scalar_one_or_none()
+    if existing_remark:
+        if op.operation_type.value == "UPDATE":
+            target = payload.get("status")
+            current = existing_remark.status
+            if not target or target == current:
+                await _register_sync_log(db, uuid, op, org_id, user_id, SyncStatus.PROCESSED, 0)
+                return {"success": True, "conflicts": []}
+            if target not in REMARK_STATUS_TRANSITIONS.get(current, set()):
+                conflicts.append(SyncConflict(
+                    operation_uuid=uuid,
+                    conflict_type=SyncConflictType.POLICY_BLOCK,
+                    server_value={"status": current},
+                    client_value={"status": target},
+                    resolution_hint=f"Invalid remark transition: {current} -> {target}.",
+                ))
+                await _register_sync_log(db, uuid, op, org_id, user_id, SyncStatus.CONFLICT, 0, {"type": "INVALID_REMARK_TRANSITION"})
+                return {"success": False, "conflicts": conflicts}
+            if target in {RemarkStatus.RESOLVED.value, RemarkStatus.VERIFIED.value} and not (payload.get("resolution_notes") or existing_remark.resolution_notes):
+                conflicts.append(SyncConflict(
+                    operation_uuid=uuid,
+                    conflict_type=SyncConflictType.POLICY_BLOCK,
+                    server_value={"status": current},
+                    client_value=payload,
+                    resolution_hint="Resolution notes are required before verification or resolution.",
+                ))
+                await _register_sync_log(db, uuid, op, org_id, user_id, SyncStatus.CONFLICT, 0, {"type": "MISSING_RESOLUTION_NOTES"})
+                return {"success": False, "conflicts": conflicts}
+            existing_remark.status = target
+            if payload.get("resolution_notes") is not None:
+                existing_remark.resolution_notes = payload["resolution_notes"]
+            if payload.get("resolution_photos") is not None:
+                existing_remark.resolution_photos = payload["resolution_photos"]
+            if target in {RemarkStatus.RESOLVED.value, RemarkStatus.VERIFIED.value, RemarkStatus.CLOSED.value}:
+                existing_remark.resolved_at = server_now
+            db.add(RemarkStatusEvent(
+                org_id=org_id, remark_id=remark_id, from_status=current, to_status=target,
+                reason=payload.get("reason"), resolution_notes=payload.get("resolution_notes"), actor_id=user_id,
+                event_metadata={"source": "sync.remark", "operation_uuid": uuid},
+            ))
+            await db.flush()
         await _register_sync_log(db, uuid, op, org_id, user_id, SyncStatus.PROCESSED, 0)
         return {"success": True, "conflicts": []}
 
@@ -677,6 +706,69 @@ async def _process_remark(
 
     # Register UUID as PROCESSED
     await _register_sync_log(db, uuid, op, org_id, user_id, SyncStatus.PROCESSED, 0)
+    return {"success": True, "conflicts": []}
+
+
+async def _process_daily_log(
+    db: AsyncSession,
+    op: SyncOperation,
+    org_id: int,
+    user_id: int,
+    server_now: datetime,
+) -> dict:
+    """Upsert a field diary entry through the same exactly-once sync boundary."""
+    payload = op.payload
+    conflicts: list[SyncConflict] = []
+    diary_id = str(payload.get("id") or op.entity_id)
+    project_id = payload.get("project_id")
+    diary_date_raw = payload.get("diary_date")
+    try:
+        diary_date = date.fromisoformat(str(diary_date_raw)) if diary_date_raw else None
+    except ValueError:
+        diary_date = None
+    if not diary_id or not project_id or diary_date is None:
+        conflicts.append(SyncConflict(
+            operation_uuid=op.operation_uuid,
+            conflict_type=SyncConflictType.POLICY_BLOCK,
+            server_value={}, client_value=payload,
+            resolution_hint="DAILY_LOG requires id, project_id, and diary_date.",
+        ))
+        await _register_sync_log(db, op.operation_uuid, op, org_id, user_id, SyncStatus.CONFLICT, 0, {"type": "INVALID_DAILY_LOG"})
+        return {"success": False, "conflicts": conflicts}
+
+    from app.modules.projects.models import Project
+    project = (await db.execute(select(Project).where(Project.id == int(project_id), Project.org_id == org_id))).scalar_one_or_none()
+    if not project:
+        conflicts.append(SyncConflict(
+            operation_uuid=op.operation_uuid,
+            conflict_type=SyncConflictType.POLICY_BLOCK,
+            server_value={}, client_value={"project_id": project_id},
+            resolution_hint="Project is not available in the current tenant.",
+        ))
+        await _register_sync_log(db, op.operation_uuid, op, org_id, user_id, SyncStatus.CONFLICT, 0, {"type": "PROJECT_SCOPE"})
+        return {"success": False, "conflicts": conflicts}
+
+    existing = (await db.execute(select(FieldDiaryEntry).where(FieldDiaryEntry.id == diary_id, FieldDiaryEntry.org_id == org_id).with_for_update())).scalar_one_or_none()
+    if not existing:
+        existing = (await db.execute(select(FieldDiaryEntry).where(
+            FieldDiaryEntry.org_id == org_id,
+            FieldDiaryEntry.project_id == int(project_id),
+            FieldDiaryEntry.diary_date == diary_date,
+            FieldDiaryEntry.created_by == user_id,
+        ).with_for_update())).scalar_one_or_none()
+
+    fields = ("project_id", "diary_date", "weather", "workforce", "equipment", "visits_total", "visits_accepted", "observations", "gps_tag", "attachments")
+    if existing:
+        for field in fields:
+            if field in payload:
+                setattr(existing, field, diary_date if field == "diary_date" else payload[field])
+    else:
+        create_values = {field: payload.get(field) for field in fields if field in payload}
+        create_values["diary_date"] = diary_date
+        existing = FieldDiaryEntry(id=diary_id, org_id=org_id, created_by=user_id, **create_values)
+        db.add(existing)
+    await db.flush()
+    await _register_sync_log(db, op.operation_uuid, op, org_id, user_id, SyncStatus.PROCESSED, 0)
     return {"success": True, "conflicts": []}
 
 
