@@ -418,7 +418,16 @@ export function QualityScreen({ project, remarks, orgId, onRefresh }: QualityScr
     setResolveSaving(true)
 
     try {
+      const currentRemark = remarks.find((remark) => remark.id === resolveRemarkId)
+      const currentStatus = currentRemark?.status || 'IN_REVIEW'
       if (isOnline) {
+        if (currentStatus === 'OPEN') {
+          const reviewResponse = await apiRequest(`/quality/remarks/${resolveRemarkId}`, {
+            method: 'PATCH',
+            body: JSON.stringify({ status: 'IN_REVIEW' }),
+          })
+          if (!reviewResponse.success) throw new Error(reviewResponse.error || 'فشل نقل الملاحظة إلى قيد المراجعة')
+        }
         const response = await apiRequest(`/quality/remarks/${resolveRemarkId}`, {
           method: 'PATCH',
           body: JSON.stringify({
@@ -430,14 +439,13 @@ export function QualityScreen({ project, remarks, orgId, onRefresh }: QualityScr
 
         toast({
           title: 'تم الحل',
-          description: 'تم حل ملاحظة الجودة بنجاح',
+          description: currentStatus === 'OPEN' ? 'تم نقل الملاحظة إلى المراجعة ثم حلها بنجاح' : 'تم حل ملاحظة الجودة بنجاح',
         })
       } else {
-        // Save resolution offline
-        await resolveRemarkOffline(resolveRemarkId, resolutionNotes.trim())
+        await resolveRemarkOffline(resolveRemarkId, resolutionNotes.trim(), currentStatus)
         toast({
           title: 'تم الحفظ محلياً',
-          description: 'تم حفظ الحل محلياً وسيُرسل عند الاتصال',
+          description: currentStatus === 'OPEN' ? 'تم حفظ مسار المراجعة والحل محلياً وسيُرسل عند الاتصال' : 'تم حفظ الحل محلياً وسيُرسل عند الاتصال',
         })
       }
 
@@ -455,7 +463,7 @@ export function QualityScreen({ project, remarks, orgId, onRefresh }: QualityScr
     } finally {
       setResolveSaving(false)
     }
-  }, [resolveRemarkId, resolutionNotes, isOnline, orgId, onRefresh, toast])
+  }, [resolveRemarkId, resolutionNotes, isOnline, remarks, orgId, onRefresh, toast])
 
   // ---- Open Resolve Dialog ----
   const openResolveDialog = useCallback(

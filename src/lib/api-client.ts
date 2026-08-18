@@ -68,7 +68,28 @@ function notifySyncListeners(pendingCount: number) { syncListeners.forEach(fn =>
 export function onSyncStatusChange(listener: (status: SyncStatus) => void): () => void { syncListeners.add(listener); return () => syncListeners.delete(listener) }
 
 /** Public sync entrypoint used by the offline UI and online recovery handler. */
-export async function processSyncQueue(): Promise<{ processed: number; failed: number; remaining: number; conflicts: any[] }> { if (isSyncing || !onlineStatus) return { processed: 0, failed: 0, remaining: 0, conflicts: [] }; isSyncing = true; syncErrors = []; let processed = 0; let failed = 0; const conflicts: any[] = []; let pendingItems: SyncQueueItem[] = []; try { pendingItems = await getPendingSyncItems(); notifySyncListeners(pendingItems.length); if (!pendingItems.length) return { processed: 0, failed: 0, remaining: 0, conflicts: [] }; const operations = pendingItems.map(item => { const payload = JSON.parse(item.payload); return { operation_uuid: item.operationUuid, operation_type: item.operationType, entity_type: _mapEntityType(item.entityType), entity_id: _extractEntityId(payload, item), payload, device_timestamp: new Date(item.createdAt).toISOString() } }); const send = () => fetch(`${API_BASE}/sync/push`, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', ...(getAccessToken() ? { Authorization: `Bearer ${getAccessToken()}` } : {}) }, body: JSON.stringify({ operations }) }); let res = await send(); if (res.status === 401) { await useAuthStore.getState().refreshAccessToken(); res = await send() }; if (res.ok || res.status === 207) { const data = await res.json(); for (const uuid of data.processed || []) { const item = pendingItems.find(i => i.operationUuid === uuid); if (item?.id) { await updateSyncQueueItem(item.id, { status: 'COMPLETED', processedAt: Date.now() }); processed++ } }; for (const conflict of data.conflicts || []) { const item = pendingItems.find(i => i.operationUuid === conflict.operation_uuid); if (item?.id) { await updateSyncQueueItem(item.id, { status: 'CONFLICT', lastError: `${conflict.conflict_type}: ${conflict.resolution_hint}`, serverData: conflict.server_value || null }); failed++ }; conflicts.push(conflict); syncErrors.push(`${conflict.conflict_type}: ${conflict.resolution_hint}`) }; await clearCompletedSyncItems() } else if (res.status === 409) { const data = await res.json(); for (const conflict of data.conflicts || []) { const item = pendingItems.find(i => i.operationUuid === conflict.operation_uuid); if (item?.id) await updateSyncQueueItem(item.id, { status: 'CONFLICT', lastError: `${conflict.conflict_type}: ${conflict.resolution_hint}` }); failed++; conflicts.push(conflict); syncErrors.push(`BLOCKED: ${conflict.resolution_hint}`) } } else { syncErrors.push(`HTTP ${res.status}`); for (const item of pendingItems) { const retryCount = item.retryCount + 1; const terminal = retryCount >= item.maxRetries; await updateSyncQueueItem(item.id!, { status: terminal ? 'FAILED' : 'PENDING', retryCount, lastError: `HTTP ${res.status}` }); if (terminal) failed++ } } } catch (err) { const message = String(err); syncErrors.push(message); for (const item of pendingItems) { const retryCount = item.retryCount + 1; const terminal = retryCount >= item.maxRetries; await updateSyncQueueItem(item.id!, { status: terminal ? 'FAILED' : 'PENDING', retryCount, lastError: message }); if (terminal) failed++ } } finally { isSyncing = false; lastSyncAt = Date.now(); notifySyncListeners(await getPendingSyncCount()) }; return { processed, failed, remaining: await getPendingSyncCount(), conflicts } }
+export async function processSyncQueue(): Promise<{ processed: number; failed: number; remaining: number; conflicts: any[] }> { if (isSyncing || !onlineStatus) return { processed: 0, failed: 0, remaining: 0, conflicts: [] }; isSyncing = true; syncErrors = []; let processed = 0; let failed = 0; const conflicts: any[] = []; let pendingItems: SyncQueueItem[] = []; try { pendingItems = await getPendingSyncItems(); notifySyncListeners(pendingItems.length); if (!pendingItems.length) return { processed: 0, failed: 0, remaining: 0, conflicts: [] }; for (const item of pendingItems.filter(candidate => candidate.entityType === 'photo')) {
+      try {
+        const payload = JSON.parse(item.payload)
+        const photo = payload.photoId ? await db.photos.get(String(payload.photoId)) : undefined
+        if (!photo) throw new Error('PHOTO_LOCAL_BLOB_NOT_FOUND')
+        const file = new File([photo.blob], `photo-${photo.id}.jpg`, { type: photo.blob.type || 'image/jpeg' })
+        const uploaded = await uploadFile(item.endpoint, [file])
+        if (!uploaded.success) throw new Error(uploaded.error || 'PHOTO_UPLOAD_FAILED')
+        await db.photos.update(photo.id, { uploadedAt: new Date().toISOString(), pendingSync: false })
+        await updateSyncQueueItem(item.id!, { status: 'COMPLETED', processedAt: Date.now(), lastError: null })
+        item.status = 'COMPLETED'
+        processed++
+      } catch (error) {
+        const message = String(error)
+        const retryCount = item.retryCount + 1
+        const terminal = retryCount >= item.maxRetries
+        await updateSyncQueueItem(item.id!, { status: terminal ? 'FAILED' : 'PENDING', retryCount, lastError: message })
+        if (terminal) failed++
+        syncErrors.push(message)
+      }
+    }
+    const operations = pendingItems.filter(item => item.entityType !== 'photo').map(item => { const payload = JSON.parse(item.payload); return { operation_uuid: item.operationUuid, operation_type: item.operationType, entity_type: _mapEntityType(item.entityType), entity_id: _extractEntityId(payload, item), payload, device_timestamp: new Date(item.createdAt).toISOString() } }); const send = () => fetch(`${API_BASE}/sync/push`, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', ...(getAccessToken() ? { Authorization: `Bearer ${getAccessToken()}` } : {}) }, body: JSON.stringify({ operations }) }); let res: Response | null = operations.length ? await send() : null; if (res?.status === 401) { await useAuthStore.getState().refreshAccessToken(); res = await send() }; if (res && (res.ok || res.status === 207)) { const data = await res.json(); for (const uuid of data.processed || []) { const item = pendingItems.find(i => i.operationUuid === uuid); if (item?.id) { await updateSyncQueueItem(item.id, { status: 'COMPLETED', processedAt: Date.now() }); processed++ } }; for (const conflict of data.conflicts || []) { const item = pendingItems.find(i => i.operationUuid === conflict.operation_uuid); if (item?.id) { await updateSyncQueueItem(item.id, { status: 'CONFLICT', lastError: `${conflict.conflict_type}: ${conflict.resolution_hint}`, serverData: conflict.server_value || null }); failed++ }; conflicts.push(conflict); syncErrors.push(`${conflict.conflict_type}: ${conflict.resolution_hint}`) }; await clearCompletedSyncItems() } else if (res?.status === 409) { const data = await res.json(); for (const conflict of data.conflicts || []) { const item = pendingItems.find(i => i.operationUuid === conflict.operation_uuid); if (item?.id) await updateSyncQueueItem(item.id, { status: 'CONFLICT', lastError: `${conflict.conflict_type}: ${conflict.resolution_hint}` }); failed++; conflicts.push(conflict); syncErrors.push(`BLOCKED: ${conflict.resolution_hint}`) } } else if (res) { syncErrors.push(`HTTP ${res.status}`); for (const item of pendingItems) { if (item.status === 'COMPLETED') continue; const retryCount = item.retryCount + 1; const terminal = retryCount >= item.maxRetries; await updateSyncQueueItem(item.id!, { status: terminal ? 'FAILED' : 'PENDING', retryCount, lastError: `HTTP ${res.status}` }); if (terminal) failed++ } } } catch (err) { const message = String(err); syncErrors.push(message); for (const item of pendingItems) { if (item.status === 'COMPLETED') continue; const retryCount = item.retryCount + 1; const terminal = retryCount >= item.maxRetries; await updateSyncQueueItem(item.id!, { status: terminal ? 'FAILED' : 'PENDING', retryCount, lastError: message }); if (terminal) failed++ } } finally { isSyncing = false; lastSyncAt = Date.now(); notifySyncListeners(await getPendingSyncCount()) }; return { processed, failed, remaining: await getPendingSyncCount(), conflicts } }
 
 export async function fullDataSync(orgId: string): Promise<{ success: boolean; synced: { projects: number; users: number; remarks: number; auditLogs: number; dictionaries: number }; errors: string[] }> {
   const errors: string[] = []
@@ -119,16 +140,33 @@ function normalizeProjectBoqItem(item: any) {
   }
 }
 
+async function listAllExecutionStates(projectId: string): Promise<any[]> {
+  const items: any[] = []
+  let page = 1
+  let total = 0
+  let hasMore = true
+  while (hasMore) {
+    const result = await normalizedHybrid(apiRequest<any>(`/execution/state?project_id=${encodeURIComponent(projectId)}&page=${page}&page_size=500`))
+    if (!result.success || !result.data) return items
+    const pageItems = Array.isArray(result.data.items) ? result.data.items : []
+    items.push(...pageItems)
+    total = Number(result.data.total ?? items.length)
+    hasMore = Boolean(result.data.hasMore ?? result.data.has_more) && items.length < total
+    page += 1
+    if (page > 1000) throw new Error('Execution state pagination exceeded safety limit')
+  }
+  return items
+}
+
 async function hydrateProjectRuntime(project: any): Promise<any> {
   const projectId = String(project.id)
-  const [canonicalResult, aggregationResult, stateResult] = await Promise.all([
+  const [canonicalResult, aggregationResult, states] = await Promise.all([
     normalizedHybrid(apiRequest<any>(`/projects/${encodeURIComponent(projectId)}/canonical-boq`)),
     normalizedHybrid(apiRequest<any>(`/execution/aggregation/project/${encodeURIComponent(projectId)}`)),
-    normalizedHybrid(apiRequest<any>(`/execution/state?project_id=${encodeURIComponent(projectId)}&page=1&page_size=500`)),
+    listAllExecutionStates(projectId),
   ])
   const canonical = canonicalResult.success && canonicalResult.data ? canonicalResult.data : {}
   const aggregation = aggregationResult.success && aggregationResult.data ? aggregationResult.data : {}
-  const states = stateResult.success && stateResult.data ? stateResult.data.items || [] : []
   const boqItems = (Array.isArray(canonical.boqItems)
     ? canonical.boqItems
     : Array.isArray(canonical.boq_items)

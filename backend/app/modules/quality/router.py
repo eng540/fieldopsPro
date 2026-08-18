@@ -31,6 +31,7 @@ from app.modules.quality.schemas import (
     RemarkRead,
     RemarkTemplateRead,
 )
+from app.modules.projects.models import ProjectUnit
 
 router = APIRouter()
 _AUTO_HOLD_SEVERITIES = {RemarkSeverity.CRITICAL.value, RemarkSeverity.MAJOR.value}
@@ -115,14 +116,30 @@ async def update_remark_status(remark_id: str, data: RemarkStatusUpdate, db: Asy
 @router.get("/remarks", response_model=RemarkListResponse)
 async def list_remarks(unit_id: int | None = Query(None), severity: str | None = Query(None), remark_status: str | None = Query(None, alias="status"), work_order_id: int | None = Query(None), db: AsyncSession = Depends(get_db), current_user: dict = Depends(get_current_user)) -> dict:
     org_id = current_user["org_id"]
-    filters = [Remark.org_id == org_id]
+    filters = [Remark.org_id == org_id, ProjectUnit.org_id == org_id]
     if unit_id is not None: filters.append(Remark.unit_id == unit_id)
     if severity: filters.append(Remark.severity == severity)
     if remark_status: filters.append(Remark.status == remark_status)
     if work_order_id is not None: filters.append(Remark.work_order_id == work_order_id)
-    items = (await db.execute(select(Remark).where(*filters).order_by(Remark.created_at.desc()))).scalars().all()
+    rows = (await db.execute(
+        select(Remark, ProjectUnit)
+        .join(ProjectUnit, ProjectUnit.id == Remark.unit_id)
+        .where(*filters)
+        .order_by(Remark.created_at.desc())
+    )).all()
+    items = []
+    for remark, unit in rows:
+        item = {column.name: getattr(remark, column.name) for column in Remark.__table__.columns}
+        item["unit"] = {
+            "id": unit.id,
+            "name": unit.name,
+            "code": unit.code,
+            "project_id": unit.project_id,
+            "unit_type": unit.unit_type,
+        }
+        items.append(item)
     closed = {RemarkStatus.CLOSED.value, RemarkStatus.RESOLVED.value}
-    return {"items": items, "total": len(items), "open_count": sum(1 for r in items if r.status not in closed), "critical_count": sum(1 for r in items if r.severity == RemarkSeverity.CRITICAL.value)}
+    return {"items": items, "total": len(items), "open_count": sum(1 for r, _ in rows if r.status not in closed), "critical_count": sum(1 for r, _ in rows if r.severity == RemarkSeverity.CRITICAL.value)}
 
 
 @router.get("/remarks/{remark_id}/history", response_model=RemarkStatusEventListResponse)

@@ -72,7 +72,12 @@ export function SpeedEntryGrid({ project, orgId, onRefresh }: Props) {
       const result = response.data
       await loadExecutionStates()
       await onRefresh()
-      toast({ title: 'تمت تهيئة حالات التنفيذ', description: `تمت تهيئة ${result.initialized_count} حالة من أصل ${result.assignment_count} تعيين.` })
+      const description = result.initialized_count > 0
+        ? `تمت تهيئة ${result.initialized_count} حالة، وكانت ${result.existing_count} حالة موجودة مسبقًا من أصل ${result.assignment_count} تعيين.`
+        : result.existing_count === result.assignment_count
+          ? `كل الحالات موجودة مسبقًا (${result.existing_count} حالة). تم تحديث العرض الكامل من الخادم.`
+          : `لم تُنشأ حالات جديدة. الموجود: ${result.existing_count} من أصل ${result.assignment_count} تعيين.`
+      toast({ title: 'تم فحص حالات التنفيذ', description })
     } catch (error) {
       toast({ title: 'تعذر تهيئة حالات التنفيذ', description: error instanceof Error ? error.message : String(error), variant: 'destructive' })
     } finally {

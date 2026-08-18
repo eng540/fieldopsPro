@@ -16,7 +16,22 @@ export async function updateWorkOrder(id:number,payload:Record<string,unknown>){
 export async function assignWorkOrder(id:number,userId:number,notes?:string){return request(`/execution/work-orders/${id}/assign`,{method:'POST',body:JSON.stringify({user_id:userId,notes})})}
 export interface ExecutionState{id:number;org_id:number;unit_id:number;boq_item_id:number;completion_pct:number;status:string;state_version:number;actual_quantity:number|null;last_event_id:string|null}
 export interface ExecutionStatePage{items:ExecutionState[];total:number;page:number;page_size:number;has_more:boolean}
-export async function listExecutionState(projectId:string|number,pageSize=500){return request<ExecutionStatePage>(`/execution/state?project_id=${encodeURIComponent(projectId)}&page=1&page_size=${pageSize}`)}
+export async function listExecutionState(projectId:string|number,pageSize=500){
+  const safePageSize = Math.min(Math.max(Math.floor(pageSize), 1), 500)
+  const items: ExecutionState[] = []
+  let page = 1
+  let total = 0
+  let hasMore = true
+  while (hasMore) {
+    const result = await request<ExecutionStatePage>(`/execution/state?project_id=${encodeURIComponent(projectId)}&page=${page}&page_size=${safePageSize}`)
+    items.push(...(result.items || []))
+    total = result.total
+    hasMore = Boolean(result.has_more && items.length < total)
+    page += 1
+    if (page > 1000) throw new Error('Execution state pagination exceeded safety limit')
+  }
+  return { items, total, page: 1, page_size: items.length, has_more: false } satisfies ExecutionStatePage
+}
 export async function getExecutionState(unitId:number,boqItemId:number){
   try { return await request<ExecutionState>(`/execution/state/${unitId}/${boqItemId}`) }
   catch (error) {
