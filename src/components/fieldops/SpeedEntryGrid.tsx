@@ -75,7 +75,8 @@ export function SpeedEntryGrid({ project, orgId, onRefresh }: Props) {
     if (c.value < c.original) { setRework({key:keyFor(c.unitId,c.boqId),cell:c,next:c.value}); return }
     try {
       const state = await getExecutionState(c.unitId,c.boqId)
-      const response = await submitProgressEvent({unitId:c.unitId,boqItemId:c.boqId,expectedVersion:Number(state?.state_version ?? executionStates[keyFor(c.unitId,c.boqId)]?.state_version ?? 1),completionPct:c.value,currentPct:Number(state?.completion_pct ?? c.original)}) as EventBatchResponse
+      if (!state) throw new Error('حالة التنفيذ غير مهيأة لهذا البند. أعد مزامنة المشروع أو طبّق البند من إعداد المشروع قبل الحفظ.')
+      const response = await submitProgressEvent({unitId:c.unitId,boqItemId:c.boqId,expectedVersion:Number(state.state_version),completionPct:c.value,currentPct:Number(state.completion_pct ?? c.original)}) as EventBatchResponse
       if ((response.failed || []).length || (response.conflicts || []).length) throw new Error((response.failed || [])[0]?.error || 'تعارض في حالة التنفيذ')
     } catch (error) {
       if (!isOnline()) { await queueProgressOffline(orgId,{unitId:String(c.unitId),boqItemId:String(c.boqId),completionPct:c.value,reworkFlag:false,reworkReason:''}); return }
