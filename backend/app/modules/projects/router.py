@@ -192,15 +192,29 @@ async def assign_boq_to_unit(project_id: int, unit_id: int, boq_item_id: int, da
 
 @router.post("/{project_id}/units/{unit_id}/boq", response_model=BOQItemRead, status_code=201)
 async def legacy_create_or_assign_boq(project_id: int, unit_id: int, data: BOQItemCreate, db: AsyncSession = Depends(get_db), current_user: dict = Depends(get_current_user)) -> BOQItem:
-    """Compatibility endpoint. It creates one project BOQ definition and assigns it to the unit."""
+    """Compatibility facade: assign an existing project BOQ item; never create BOQ from a unit context."""
     org_id = current_user["org_id"]
     unit = (await db.execute(select(ProjectUnit).where(ProjectUnit.id == unit_id, ProjectUnit.project_id == project_id, ProjectUnit.org_id == org_id))).scalar_one_or_none()
     if not unit:
         raise HTTPException(status_code=404, detail="Unit not found in project")
-    query = select(BOQItem).where(BOQItem.project_id == project_id, BOQItem.org_id == org_id, BOQItem.trade == data.trade, BOQItem.description == data.description, BOQItem.unit_of_measure == data.unit_of_measure, BOQItem.is_active.is_(True))
+
+    query = select(BOQItem).where(
+        BOQItem.project_id == project_id,
+        BOQItem.org_id == org_id,
+        BOQItem.is_active.is_(True),
+        BOQItem.trade == data.trade,
+        BOQItem.description == data.description,
+        BOQItem.unit_of_measure == data.unit_of_measure,
+    )
+    if data.code:
+        query = query.where(BOQItem.code == data.code.strip().upper())
     item = (await db.execute(query)).scalars().first()
     if item is None:
-        item = await create_project_boq(project_id, data, db, current_user)
+        raise HTTPException(
+            status_code=409,
+            detail="Master BOQ item not found; create it under project BOQ before assigning it to a unit",
+        )
+
     existing = (await db.execute(select(UnitBoQAssignment).where(UnitBoQAssignment.unit_id == unit_id, UnitBoQAssignment.boq_item_id == item.id))).scalar_one_or_none()
     if existing is None:
         db.add(UnitBoQAssignment(org_id=org_id, unit_id=unit_id, boq_item_id=item.id, planned_quantity=data.quantity))

@@ -1,6 +1,6 @@
 # Ncrpro110 Branch 8 — Capability Map
 
-Status: initial recovery map
+Status: execution-ready recovery map
 Source repository: `eng540/Ncrpro110`
 Source branch: `eng540-patch-8`
 Source commit: `b4faf62d3e5d968686ed56197e0b5b5716a9e428`
@@ -8,36 +8,72 @@ Target: `eng540/fieldopsPro` branch `fieldops-v4`
 
 ## Recovery rule
 
-This document maps user capabilities and business behavior. Legacy source code is not treated as the target architecture. Each capability is classified as KEEP, ADAPT, MERGE, REPLACE, or DROP after comparison with existing V4 behavior.
+This document maps user capabilities and business behavior. Legacy source code is not treated as the target architecture. Each capability is classified as **KEEP**, **ADAPT**, **MERGE**, **REPLACE**, or **DROP** after comparison with existing V4 behavior. No legacy React screen, database table, or direct BOQ-per-unit model is copied into V4.
 
-## Initial capability inventory
+## Capability inventory
 
-| Feature ID | Legacy Evidence | User Goal | Inputs / Data | Outputs / Behavior | Current V4 Equivalent | Initial Classification | Gap / Next Action |
-|---|---|---|---|---|---|---|---|
-| LEGACY-001 | README: BOQ tracking and auto-calculation | Track work at item level | Unit/latrine, BOQ code, category, description, unit, planned qty, achieved qty | Item progress and roll-up | Project → Units → BOQ + execution aggregation | MERGE | Verify one authoritative Unit-BOQ state and progress event path |
-| LEGACY-002 | README: weighted progress A/B/C | Calculate meaningful overall progress | Category weights + item achievement | Weighted overall % | V4 aggregation/progress | ADAPT | Preserve configurable weights; do not hard-code project categories |
-| LEGACY-003 | README: quality gate per BOQ item | Prevent progress from ignoring quality | quality_pass, inspection date, inspector | Pass/Fail/Pending quality state | V4 Quality + remarks | MERGE | Link quality gate to execution/BOQ state rather than separate dataset |
-| LEGACY-004 | README: remark tracking + escalation | Record and close defects | Unit, BOQ code, type, severity, description, action, deadline, status, photo | Open/closed remark lifecycle | V4 QualityScreen / remarks | MERGE | Map legacy severity/action/deadline semantics into V4 lifecycle |
-| LEGACY-005 | README: daily site diary | Record daily field activity | Date, engineer, inspected units, accepted units, remarks, weather, manpower, equipment, notes | Daily operational record | V4 FieldDiaryScreen | MERGE | Ensure diary references current project/unit/execution/quality context |
-| LEGACY-006 | Frontend tree: service worker + syncEngine + sync modules | Work when connectivity is unavailable | Local writes + queue metadata | Deferred sync to server | V4 offline-db + sync hooks + service worker | ADAPT | Test real offline create → queue → reconnect → server verification |
-| LEGACY-007 | README: payment-ready progress export | Turn progress into reporting/IPC output | Aggregated completion data | Report/IPC-ready percentage data | V4 LegacyReportsScreen + aggregation | ADAPT | Ensure reports read the same execution-derived source of truth |
-| LEGACY-008 | Frontend tree: RemarksManager.js and remark-related backend | Manage defects in field workflow | Remark CRUD + status | Lifecycle updates | V4 QualityScreen | MERGE | Recover useful workflow rules, not the old screen implementation |
-| LEGACY-009 | README: bulk seed/create workflow | Create many operational units/items quickly | Unit registry + BOQ template data | Bulk-created units/items | V4 bulk import / bulk execution | ADAPT | Apply validation, idempotency and transaction boundaries |
-| LEGACY-010 | Frontend tree: local db/storage/sync | Persist field data locally | Local DB/storage | Offline cache and queue | V4 offline-db | REPLACE | V4 architecture supersedes legacy storage mechanism; recover behavior only |
+| Feature ID | Legacy Evidence | User Goal | Inputs / Data | Outputs / Behavior | Current V4 Equivalent | Decision | Gap / Next Action | Priority |
+|---|---|---|---|---|---|---|---|---|
+| B8-001 | README and BOQ tracking | Track work at item level | Project, Unit, Master BOQ, planned/actual quantity | Item progress and roll-up | Project → Units → BOQ → Assignment → Execution | MERGE | Keep Master BOQ central and prove one Assignment per Unit × BOQ | P0 |
+| B8-002 | Weighted progress A/B/C | Calculate meaningful overall progress | Category weights and item achievement | Weighted overall percentage | V4 aggregation/progress | ADAPT | Preserve configurable weights; do not hard-code categories or use Project.completion_pct as sole truth | P0 |
+| B8-003 | Quality gate per BOQ item | Prevent progress from ignoring quality | Quality status, inspection date, inspector | Pass/Fail/Pending gate | V4 Quality and remarks | MERGE | Link Quality Case to unit/BOQ/execution where applicable | P1 |
+| B8-004 | RemarksManager and escalation | Record and close defects | Unit, BOQ, type, severity, action, deadline, evidence, status | Open/closed/reopened lifecycle | V4 QualityScreen / remarks | MERGE | Add evidence, deadline, resolution, closure, and reopen semantics | P1 |
+| B8-005 | Daily site diary | Record daily field activity | Date, engineer, inspected/accepted units, weather, manpower, equipment, notes | Daily operational record | V4 FieldDiaryScreen | MERGE | Define project/unit references and decide whether diary is offline or online-only | P1 |
+| B8-006 | Service worker, local DB, sync engine | Work without connectivity | Local writes, queue metadata, retry/conflict data | Deferred server sync | V4 offline-db + sync service | REPLACE | Keep behavior, but route execution progress through Event Pipeline and test real reconnect | P0 |
+| B8-007 | Payment-ready progress export | Turn progress into reporting/IPC output | Aggregated execution data | Report/IPC-ready percentage data | V4 reporting/aggregation | ADAPT | Prove reports read the same execution-derived source of truth | P0 |
+| B8-008 | Remark backend and frontend workflow | Manage field defects | Remark CRUD, status history, photos | Lifecycle updates and audit | V4 QualityScreen / quality API | MERGE | Use V4 API and tenant isolation; do not copy legacy screen | P1 |
+| B8-009 | Bulk seed/create workflow | Create many units/items quickly | Validated unit and BOQ templates | Bulk-created master data | V4 Excel import | ADAPT | Add preview, dry-run, duplicate check, idempotency, import report | P1 |
+| B8-010 | Local storage and pending uploads | Preserve field evidence offline | Local media metadata and queue state | Deferred upload with status | V4 quality photos + sync | ADAPT | Define upload states, attempts, last_error, and server verification | P1 |
+| B8-011 | Admin/configuration panel | Manage reference/configuration data | Dictionaries, project setup, import actions | Controlled administrative changes | V4 Project Configuration and Dictionaries | MERGE | Centralize auth/retry and block legacy BOQ writes | P1 |
+| B8-012 | Dashboard and roll-up | See project status consistently | Unit/BOQ/execution/quality aggregates | Operational dashboard | V4 Dashboard and Operations | ADAPT | Use one aggregation/read model and expose loading/error/partial states | P0 |
+| B8-013 | Local crypto/security guidance | Protect sensitive local data | Tokens, local records, evidence | Protected local storage | V4 auth and IndexedDB | ADAPT | Perform threat-model review before adopting encryption; do not claim security from documentation alone | P2 |
 
-## Confirmed legacy system capabilities from Branch 8
+## Fast Entry decision
 
-The legacy system is an NRC latrine tracker for Al-Zahra district and exposes a workflow centered on a master unit registry, BOQ progress, quality remarks, daily logs, dashboard aggregation, and reporting. The README documents automatic roll-up from item → latrine → project, weighted progress, quality gates, remark tracking, and payment-ready progress export.
+`SpeedEntryMatrix` is **ADAPT**, not a copy. V4 must render a cell only for an active `UnitBoQAssignment` and a valid `UnitBoQProgress` state. The cell state must be explicit:
 
-The Branch 8 tree also contains dedicated frontend service-worker, local-db/storage, and synchronization modules. These are evidence of offline-first field behavior and must be analyzed as user capabilities rather than copied into V4.
+| State | User display | Allowed action |
+|---|---|---|
+| Assigned + state exists | Editable value | Save through Event Pipeline |
+| Assigned + state missing | `تهيئة مطلوبة` | Initialize safely or block with actionable message |
+| Not assigned | `غير مطبق` | Link to Project Configuration; no hidden input |
+| Offline pending | Local value + pending badge | Queue with idempotency metadata |
+| Conflict | Server/local values + reason | Resolve explicitly; no blind overwrite |
 
-## Required next analysis
+## Bulk Entry decision
 
-1. Inspect Branch 8 frontend screens/components to identify field-entry and bulk workflows.
-2. Inspect backend CRUD/business rules for exact validation, roll-up, quality, remark, and diary semantics.
-3. Compare every discovered capability with V4 existing modules before creating anything new.
-4. Promote only behavior that closes a real V4 operational gap.
+Bulk Entry must select Units, select only applied BOQ items, enter a value, preview, validate, apply through a transaction group, and show `succeeded`, `conflicts`, and `failed` per cell. It must not create BOQ definitions. The API must explicitly declare whether the batch is atomic or partial-success; silent partial success is prohibited.
+
+## Excel decision
+
+The legacy bulk-import capability is **ADAPT**. The V4 pipeline must be:
+
+```text
+Download Template
+→ Upload
+→ Parse/Preview
+→ Validate Rows and Relationships
+→ Dry Run
+→ Duplicate/Idempotency Check
+→ Approve
+→ Import Transaction
+→ Import Report
+```
+
+The report must distinguish created, updated, skipped, and failed rows and must identify row/column errors. Units, Master BOQ, and Assignments remain separate data operations.
+
+## Offline decision
+
+Offline behavior is retained but the legacy storage implementation is **REPLACE**. V4 queue records must include `sync_uuid`, `status`, `attempts`, `created_at`, `last_error`, and `payload`. Progress must use the same event contract online and offline. Daily Diary must either receive an explicit sync contract or be documented as online-only; it must not be silently omitted.
+
+## Branch 8 recovery record required for every future capability
+
+Before implementation, record Feature ID, source evidence, User Goal, User Actions, Inputs, Outputs, Business Rules, Data Required, Current V4 Equivalent, Gap, Decision, Priority, API contract, persistence evidence, runtime test, and rollback plan.
+
+## Drop rules
+
+Drop any behavior that repeats Master BOQ per Unit, writes progress directly without an event, uses Last Write Wins without conflict evidence, relies on demo data as a production fix, or has no clear user goal and business rule.
 
 ## Acceptance principle
 
-A recovered capability is complete only when it is implemented in V4, uses the V4 API/data model, respects org/project isolation, is testable, and feeds the same operational source of truth used by execution, progress, quality, diary, reporting, and sync.
+A recovered capability is complete only when it is implemented in V4, uses the V4 API/data model, respects org/project isolation, is covered by contract/integration tests, survives reload and retry, and feeds the same operational source of truth used by execution, progress, quality, diary, reporting, and sync.

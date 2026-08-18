@@ -21,12 +21,17 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any
+from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.execution.models import (
     MONOTONIC_STATUS_TRANSITIONS,
+    EntityType,
+    EventClass,
+    EventType,
+    MetricType,
     WorkOrder,
     WorkOrderStatus,
     WorkOrderStatusHistory,
@@ -37,6 +42,8 @@ from app.modules.execution.models import (
 )
 from app.modules.quality.models import Remark, RemarkStatus
 from app.modules.projects.models import UnitBoQAssignment
+from app.modules.execution.schemas import EventIntent
+from app.modules.execution.service import BusinessRuleError, ConcurrentModificationError, initialize_boq_state, process_event_intent
 from app.modules.sync.schemas import (
     SyncBundle,
     SyncConflict,
@@ -417,165 +424,173 @@ async def _process_unit_progress(
     user_id: int,
     server_now: datetime,
 ) -> dict:
-    """Process a UNIT_PROGRESS sync operation.
+    """Apply offline progress through the same Event Pipeline as online writes.
 
-    Updates UnitBoQProgress rows with Monotonic Progress enforcement.
-    Entity_id format: "{unit_id}:{boq_item_id}" or just the progress record id.
+    The sync payload is an absolute snapshot for either completion_pct or
+    actual_quantity. The adapter converts it into a DELTA_ADD or REWORK event,
+    initializes missing assigned state safely, and never writes the materialized
+    progress table directly.
     """
     uuid = op.operation_uuid
     payload = op.payload
     conflicts: list[SyncConflict] = []
 
-    # Parse entity_id — try numeric first, then unit_id:boq_item_id format
+    unit_id: int | None = None
+    boq_item_id: int | None = None
     entity_id = op.entity_id
-    progress_id = None
-    unit_id = None
-    boq_item_id = None
+    if ":" in entity_id:
+        try:
+            unit_id, boq_item_id = (int(part) for part in entity_id.split(":", 1))
+        except ValueError:
+            unit_id = boq_item_id = None
+    elif entity_id.isdigit():
+        progress_result = await db.execute(select(UnitBoQProgress).where(UnitBoQProgress.id == int(entity_id)))
+        existing_progress = progress_result.scalar_one_or_none()
+        if existing_progress is not None:
+            unit_id, boq_item_id = existing_progress.unit_id, existing_progress.boq_item_id
 
-    try:
-        progress_id = int(entity_id)
-    except ValueError:
-        # Try unit_id:boq_item_id format
-        if ":" in entity_id:
-            parts = entity_id.split(":", 1)
-            try:
-                unit_id = int(parts[0])
-                boq_item_id = int(parts[1])
-            except ValueError:
-                conflicts.append(SyncConflict(
-                    operation_uuid=uuid,
-                    conflict_type=SyncConflictType.POLICY_BLOCK,
-                    server_value={},
-                    client_value={"entity_id": entity_id},
-                    resolution_hint=f"entity_id must be a numeric progress ID or 'unit_id:boq_item_id' format. Got: {entity_id!r}",
-                ))
-                await _register_sync_log(db, uuid, op, org_id, user_id, SyncStatus.FAILED, 0)
-                return {"success": False, "conflicts": conflicts}
-        else:
-            conflicts.append(SyncConflict(
-                operation_uuid=uuid,
-                conflict_type=SyncConflictType.POLICY_BLOCK,
-                server_value={},
-                client_value={"entity_id": entity_id},
-                resolution_hint=f"Invalid entity_id format: {entity_id!r}",
-            ))
-            await _register_sync_log(db, uuid, op, org_id, user_id, SyncStatus.FAILED, 0)
-            return {"success": False, "conflicts": conflicts}
-
-    # Fetch UnitBoQProgress
-    if progress_id:
-        query = select(UnitBoQProgress).where(UnitBoQProgress.id == progress_id)
-    else:
-        query = select(UnitBoQProgress).where(
-            UnitBoQProgress.unit_id == unit_id,
-            UnitBoQProgress.boq_item_id == boq_item_id,
-        )
-
-    result = await db.execute(query)
-    progress = result.scalar_one_or_none()
-
-    if not progress:
-        # If CREATE operation, create a new progress record only after
-        # configuration proves that the BOQ item applies to the unit.
-        if op.operation_type.value == "CREATE":
-            resolved_unit_id = unit_id or payload.get("unit_id", 0)
-            resolved_boq_item_id = boq_item_id or payload.get("boq_item_id", 0)
-            assignment_result = await db.execute(select(UnitBoQAssignment.id).where(
-                UnitBoQAssignment.org_id == org_id,
-                UnitBoQAssignment.unit_id == resolved_unit_id,
-                UnitBoQAssignment.boq_item_id == resolved_boq_item_id,
-                UnitBoQAssignment.is_active.is_(True),
-            ))
-            if assignment_result.scalar_one_or_none() is None:
-                conflicts.append(SyncConflict(
-                    operation_uuid=uuid,
-                    conflict_type=SyncConflictType.POLICY_BLOCK,
-                    server_value={},
-                    client_value={"unit_id": resolved_unit_id, "boq_item_id": resolved_boq_item_id},
-                    resolution_hint="Apply the BOQ item to the unit before syncing execution progress.",
-                ))
-                await _register_sync_log(db, uuid, op, org_id, user_id, SyncStatus.FAILED, 0)
-                return {"success": False, "conflicts": conflicts}
-            new_progress = UnitBoQProgress(
-                org_id=org_id,
-                unit_id=resolved_unit_id,
-                boq_item_id=resolved_boq_item_id,
-                completion_pct=payload.get("completion_pct", 0.0),
-                status=payload.get("status", "NOT_STARTED"),
-                measured_quantity=payload.get("measured_quantity"),
-                rework_flag=payload.get("rework_flag", False),
-                rework_reason=payload.get("rework_reason"),
-                updated_by=user_id,
-            )
-            db.add(new_progress)
-            await db.flush()
-            await _register_sync_log(db, uuid, op, org_id, user_id, SyncStatus.PROCESSED, 0)
-            return {"success": True, "conflicts": []}
-
+    unit_id = unit_id or payload.get("unit_id")
+    boq_item_id = boq_item_id or payload.get("boq_item_id")
+    if not unit_id or not boq_item_id:
         conflicts.append(SyncConflict(
             operation_uuid=uuid,
             conflict_type=SyncConflictType.POLICY_BLOCK,
             server_value={},
             client_value={"entity_id": entity_id},
-            resolution_hint=f"UnitBoQProgress {entity_id} not found on server.",
+            resolution_hint="Offline progress requires entity_id='unit_id:boq_item_id' or both unit_id and boq_item_id.",
         ))
         await _register_sync_log(db, uuid, op, org_id, user_id, SyncStatus.FAILED, 0)
         return {"success": False, "conflicts": conflicts}
 
-    # Org isolation
-    if progress.org_id != org_id:
+    progress_result = await db.execute(select(UnitBoQProgress).where(
+        UnitBoQProgress.org_id == org_id,
+        UnitBoQProgress.unit_id == unit_id,
+        UnitBoQProgress.boq_item_id == boq_item_id,
+    ).with_for_update())
+    progress = progress_result.scalar_one_or_none()
+
+    if progress is None:
+        if op.operation_type.value != "CREATE":
+            conflicts.append(SyncConflict(
+                operation_uuid=uuid,
+                conflict_type=SyncConflictType.POLICY_BLOCK,
+                server_value={},
+                client_value={"unit_id": unit_id, "boq_item_id": boq_item_id},
+                resolution_hint="Execution state is missing; retry as CREATE only for an active assignment.",
+            ))
+            await _register_sync_log(db, uuid, op, org_id, user_id, SyncStatus.FAILED, 0)
+            return {"success": False, "conflicts": conflicts}
+        try:
+            await initialize_boq_state(db, org_id=org_id, unit_id=unit_id, boq_item_id=boq_item_id, user_id=user_id)
+        except BusinessRuleError as exc:
+            conflicts.append(SyncConflict(
+                operation_uuid=uuid,
+                conflict_type=SyncConflictType.POLICY_BLOCK,
+                server_value={},
+                client_value={"unit_id": unit_id, "boq_item_id": boq_item_id},
+                resolution_hint=str(exc),
+            ))
+            await _register_sync_log(db, uuid, op, org_id, user_id, SyncStatus.FAILED, 0)
+            return {"success": False, "conflicts": conflicts}
+        progress_result = await db.execute(select(UnitBoQProgress).where(
+            UnitBoQProgress.org_id == org_id,
+            UnitBoQProgress.unit_id == unit_id,
+            UnitBoQProgress.boq_item_id == boq_item_id,
+        ).with_for_update())
+        progress = progress_result.scalar_one_or_none()
+
+    if progress is None:
+        raise BusinessRuleError("Execution state could not be initialized for the assigned BOQ item.")
+
+    if "completion_pct" in payload:
+        metric_type = MetricType.PERCENTAGE
+        desired = float(payload["completion_pct"])
+        current = float(progress.completion_pct or 0.0)
+        key = "pct"
+    elif "actual_quantity" in payload or "measured_quantity" in payload:
+        metric_type = MetricType.QUANTITY
+        desired = float(payload.get("actual_quantity", payload.get("measured_quantity", 0.0)))
+        current = float(progress.actual_quantity or 0.0)
+        key = "qty"
+    else:
         conflicts.append(SyncConflict(
             operation_uuid=uuid,
             conflict_type=SyncConflictType.POLICY_BLOCK,
-            server_value={"org_id": progress.org_id},
-            client_value={"org_id": org_id},
-            resolution_hint="Progress record belongs to a different organization.",
+            server_value={"completion_pct": progress.completion_pct, "actual_quantity": progress.actual_quantity},
+            client_value=payload,
+            resolution_hint="Offline progress must include completion_pct or actual_quantity.",
         ))
         await _register_sync_log(db, uuid, op, org_id, user_id, SyncStatus.FAILED, 0)
         return {"success": False, "conflicts": conflicts}
 
-    # Monotonic Progress check (ADR-003)
-    new_pct = payload.get("completion_pct")
-    if new_pct is not None:
-        try:
-            new_pct_float = float(new_pct)
-        except (TypeError, ValueError):
-            new_pct_float = None
+    if desired < 0 or (metric_type == MetricType.PERCENTAGE and desired > 100):
+        conflicts.append(SyncConflict(
+            operation_uuid=uuid,
+            conflict_type=SyncConflictType.POLICY_BLOCK,
+            server_value={key: current},
+            client_value={key: desired},
+            resolution_hint="Progress values must remain within the supported range.",
+        ))
+        await _register_sync_log(db, uuid, op, org_id, user_id, SyncStatus.FAILED, 0)
+        return {"success": False, "conflicts": conflicts}
 
-        if new_pct_float is not None and new_pct_float < progress.completion_pct:
-            rework_flag = payload.get("rework_flag", False)
-            if not rework_flag:
-                conflicts.append(SyncConflict(
-                    operation_uuid=uuid,
-                    conflict_type=SyncConflictType.MONOTONIC_VIOLATION,
-                    server_value={"completion_pct": progress.completion_pct},
-                    client_value={"completion_pct": new_pct_float},
-                    resolution_hint=(
-                        f"BOQ progress cannot decrease from {progress.completion_pct}% "
-                        f"to {new_pct_float}% without rework_flag=True (ADR-003)."
-                    ),
-                ))
-                await _register_sync_log(db, uuid, op, org_id, user_id, SyncStatus.CONFLICT, 0, {
-                    "type": "MONOTONIC_VIOLATION",
-                    "server_pct": progress.completion_pct,
-                    "client_pct": new_pct_float,
-                })
-                return {"success": False, "conflicts": conflicts}
+    delta = desired - current
+    if abs(delta) < 1e-9:
+        await _register_sync_log(db, uuid, op, org_id, user_id, SyncStatus.PROCESSED, progress.id)
+        return {"success": True, "conflicts": []}
 
-    # Apply update
-    _ALLOWED_FIELDS = {
-        "completion_pct", "status", "measured_quantity",
-        "rework_flag", "rework_reason", "rework_authorized_by",
-    }
-    for field, value in payload.items():
-        if field in _ALLOWED_FIELDS:
-            setattr(progress, field, value)
+    rework = delta < 0
+    reason = payload.get("rework_reason") or ""
+    if rework and (not payload.get("rework_flag") or len(reason.strip()) < 20):
+        conflicts.append(SyncConflict(
+            operation_uuid=uuid,
+            conflict_type=SyncConflictType.MONOTONIC_VIOLATION,
+            server_value={key: current},
+            client_value={key: desired},
+            resolution_hint="A decrease requires rework_flag=true and a reason of at least 20 characters.",
+        ))
+        await _register_sync_log(db, uuid, op, org_id, user_id, SyncStatus.CONFLICT, progress.id, {"type": "MONOTONIC_VIOLATION", "server_value": current, "client_value": desired})
+        return {"success": False, "conflicts": conflicts}
 
-    progress.updated_by = user_id
-    await db.flush()
+    intent = EventIntent(
+        sync_uuid=uuid,
+        entity_type=EntityType.BOQ_ITEM,
+        entity_id=str(boq_item_id),
+        unit_id=unit_id,
+        event_class=EventClass.PROGRESS,
+        event_type=EventType.REWORK if rework else EventType.DELTA_ADD,
+        metric_type=metric_type,
+        value={key: abs(delta)},
+        occurred_at=server_now,
+        expected_version=progress.state_version,
+        reason=reason if rework else None,
+        notes=payload.get("notes"),
+        unit_of_measure=payload.get("unit_of_measure"),
+    )
+    try:
+        await process_event_intent(db, intent, org_id, user_id, transaction_group_id=payload.get("transaction_group_id"))
+    except ConcurrentModificationError as exc:
+        conflicts.append(SyncConflict(
+            operation_uuid=uuid,
+            conflict_type=SyncConflictType.CONCURRENT_MODIFICATION,
+            server_value=exc.conflict_details.current_state,
+            client_value=payload,
+            resolution_hint="Reload the current state and retry with the returned state_version.",
+        ))
+        await _register_sync_log(db, uuid, op, org_id, user_id, SyncStatus.CONFLICT, progress.id, {"type": "CONCURRENT_MODIFICATION"})
+        return {"success": False, "conflicts": conflicts}
+    except BusinessRuleError as exc:
+        conflicts.append(SyncConflict(
+            operation_uuid=uuid,
+            conflict_type=SyncConflictType.POLICY_BLOCK,
+            server_value={key: current},
+            client_value=payload,
+            resolution_hint=str(exc),
+        ))
+        await _register_sync_log(db, uuid, op, org_id, user_id, SyncStatus.FAILED, progress.id)
+        return {"success": False, "conflicts": conflicts}
 
-    # Register UUID as PROCESSED
-    await _register_sync_log(db, uuid, op, org_id, user_id, SyncStatus.PROCESSED, 0)
+    await _register_sync_log(db, uuid, op, org_id, user_id, SyncStatus.PROCESSED, progress.id)
     return {"success": True, "conflicts": []}
 
 

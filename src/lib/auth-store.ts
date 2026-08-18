@@ -12,6 +12,10 @@ export interface AuthState { user: AuthUser | null; tokens: AuthTokens | null; i
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || (typeof window !== 'undefined' ? `${window.location.origin}/api/v1` : 'http://localhost:8000/api/v1')
 const REQUEST_TIMEOUT_MS = 10_000
+// Railway cold starts can exceed the normal API timeout; auth gets a bounded
+// warm-up window without slowing ordinary data requests.
+const AUTH_LOGIN_TIMEOUT_MS = 30_000
+const AUTH_REFRESH_TIMEOUT_MS = 20_000
 const HYDRATION_TIMEOUT_MS = 5_000
 let refreshInFlight: Promise<void> | null = null
 let refreshTimer: ReturnType<typeof setTimeout> | null = null
@@ -26,7 +30,7 @@ export const useAuthStore = create<AuthState>()(persist((set, get) => ({
   login: async (email, password) => {
     set({ isLoading: true, error: null }); clearRefreshTimer()
     try {
-      const res = await fetchWithTimeout(`${API_BASE}/auth/login`, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) })
+      const res = await fetchWithTimeout(`${API_BASE}/auth/login`, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) }, AUTH_LOGIN_TIMEOUT_MS)
       const data = await parseResponse(res); if (!res.ok) throw new Error(data.detail || `فشل تسجيل الدخول (${res.status})`)
       if (!data.access_token || !data.session_id || !data.user) throw new Error('استجابة المصادقة غير مكتملة من الخادم')
       const user: AuthUser = { id: String(data.user.id), orgId: String(data.user.org_id), email: data.user.email, name: data.user.name, isActive: data.user.is_active, roles: data.user.assignments?.map((a: any) => a.role?.name).filter(Boolean) || [], assignments: data.user.assignments?.map((a: any) => ({ projectId: String(a.project_id), project: { id: String(a.project_id), name: a.project?.name || '', code: a.project?.code || '' }, role: { id: String(a.role_id), name: a.role?.name || '' } })) || [] }
@@ -43,7 +47,7 @@ export const useAuthStore = create<AuthState>()(persist((set, get) => ({
     refreshInFlight = (async () => {
       try {
         const body = current?.refreshToken ? JSON.stringify({ refresh_token: current.refreshToken }) : undefined
-        const res = await fetchWithTimeout(`${API_BASE}/auth/refresh`, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, ...(body ? { body } : {}) })
+        const res = await fetchWithTimeout(`${API_BASE}/auth/refresh`, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, ...(body ? { body } : {}) }, AUTH_REFRESH_TIMEOUT_MS)
         const data = await parseResponse(res)
         if (!res.ok || !data.access_token) throw new Error(res.status === 401 ? 'SESSION_EXPIRED' : (data.detail || `فشل تحديث الجلسة (${res.status})`))
         const expiresAt = Date.now() + ((data.expires_in || 900) * 1000)
