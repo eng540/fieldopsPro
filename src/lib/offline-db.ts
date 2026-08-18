@@ -94,7 +94,7 @@ export interface LocalPhoto {
 export interface SyncQueueItem {
   id?: number
   operationUuid: string
-  entityType: 'project' | 'unit' | 'boqProgress' | 'remark' | 'photo' | 'user' | 'dictionary'
+  entityType: 'project' | 'unit' | 'boqProgress' | 'remark' | 'diary' | 'photo' | 'user' | 'dictionary'
   operationType: 'CREATE' | 'UPDATE' | 'DELETE' | 'BULK_PROGRESS'
   endpoint: string
   method: 'POST' | 'PUT' | 'PATCH' | 'DELETE'
@@ -531,6 +531,15 @@ export async function saveBulkProgressOffline(
 // Offline-First Remark Creation
 // ============================================================
 
+function newClientUuid(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = Math.random() * 16 | 0
+    const v = c === 'x' ? r : (r & 0x3 | 0x8)
+    return v.toString(16)
+  })
+}
+
 export async function saveRemarkOffline(
   orgId: string,
   unitId: string,
@@ -539,7 +548,7 @@ export async function saveRemarkOffline(
   photos: string[] = [],
   gpsTag: Record<string, unknown> | null = null
 ): Promise<string> {
-  const remarkId = `remark-local-${Date.now()}-${Math.random().toString(36).substring(7)}`
+  const remarkId = newClientUuid()
   const now = Date.now()
 
   await db.remarks.put({
@@ -561,16 +570,47 @@ export async function saveRemarkOffline(
   })
 
   await addToSyncQueue({
-    operationUuid: `op-${now}-${Math.random().toString(36).substring(7)}`,
+    operationUuid: newClientUuid(),
     entityType: 'remark',
     operationType: 'CREATE',
     endpoint: '/quality/remarks',
     method: 'POST',
-    payload: JSON.stringify({ orgId, unitId, severity, customIssue, photos, gpsTag, createdBy: 'current-user' }),
+    payload: JSON.stringify({ id: remarkId, unit_id: Number(unitId), severity, custom_issue: customIssue, photos, gps_tag: gpsTag }),
     maxRetries: 3,
   })
 
   return remarkId
+}
+
+export async function resolveRemarkOffline(remarkId: string, resolutionNotes: string): Promise<void> {
+  const now = Date.now()
+  const existing = await db.remarks.get(remarkId)
+  if (existing) {
+    await db.remarks.put({ ...existing, status: 'RESOLVED', resolutionNotes, pendingSync: true, lastSyncedAt: now })
+  }
+  await addToSyncQueue({
+    operationUuid: newClientUuid(),
+    entityType: 'remark',
+    operationType: 'UPDATE',
+    endpoint: `/quality/remarks/${remarkId}`,
+    method: 'PATCH',
+    payload: JSON.stringify({ status: 'RESOLVED', resolution_notes: resolutionNotes }),
+    maxRetries: 3,
+  })
+}
+
+export async function saveDiaryOffline(payload: Record<string, unknown>): Promise<string> {
+  const id = newClientUuid()
+  await addToSyncQueue({
+    operationUuid: newClientUuid(),
+    entityType: 'diary',
+    operationType: 'CREATE',
+    endpoint: '/field-diary',
+    method: 'POST',
+    payload: JSON.stringify({ id, ...payload }),
+    maxRetries: 3,
+  })
+  return id
 }
 
 // ============================================================

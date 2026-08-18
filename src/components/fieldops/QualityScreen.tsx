@@ -51,7 +51,8 @@ import {
 } from 'lucide-react'
 import { useToast } from '@/hooks/use-toast'
 import { useOnlineStatus } from '@/lib/sync-hooks'
-import { saveRemarkOffline } from '@/lib/offline-db'
+import { resolveRemarkOffline, saveRemarkOffline } from '@/lib/offline-db'
+import { apiRequest } from '@/lib/api-client'
 import { MediaUploadPanel } from '@/components/fieldops/MediaUploadPanel'
 
 // ============================================================
@@ -353,28 +354,19 @@ export function QualityScreen({ project, remarks, orgId, onRefresh }: QualityScr
 
     try {
       if (isOnline) {
-        const res = await fetch('/api/quality/remarks', {
+        const response = await apiRequest<{ id: string }>('/quality/remarks', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            orgId,
-            unitId: createUnitId,
+            id: globalThis.crypto?.randomUUID?.() || `${Date.now()}-0000-4000-8000-${Math.random().toString(16).slice(2, 14)}`,
+            unit_id: Number(createUnitId),
             severity: createSeverity,
-            customIssue: createIssue.trim(),
+            custom_issue: createIssue.trim(),
             photos: [],
-            gpsTag: createGps,
-            createdBy: 'current-user',
+            gps_tag: createGps,
           }),
         })
-
-        if (!res.ok) {
-          const data = await res.json()
-          throw new Error(data.error || 'فشل إنشاء الملاحظة')
-        }
-
-        const data = await res.json()
-        const remarkId = data.remark?.id || data.id
-        setNewRemarkId(remarkId)
+        if (!response.success || !response.data) throw new Error(response.error || 'فشل إنشاء الملاحظة')
+        setNewRemarkId(response.data.id)
 
         toast({
           title: 'تم إنشاء الملاحظة',
@@ -427,19 +419,14 @@ export function QualityScreen({ project, remarks, orgId, onRefresh }: QualityScr
 
     try {
       if (isOnline) {
-        const res = await fetch(`/api/quality/remarks?id=${resolveRemarkId}`, {
+        const response = await apiRequest(`/quality/remarks/${resolveRemarkId}`, {
           method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             status: 'RESOLVED',
-            resolutionNotes: resolutionNotes.trim(),
+            resolution_notes: resolutionNotes.trim(),
           }),
         })
-
-        if (!res.ok) {
-          const data = await res.json()
-          throw new Error(data.error || 'فشل حل الملاحظة')
-        }
+        if (!response.success) throw new Error(response.error || 'فشل حل الملاحظة')
 
         toast({
           title: 'تم الحل',
@@ -447,12 +434,7 @@ export function QualityScreen({ project, remarks, orgId, onRefresh }: QualityScr
         })
       } else {
         // Save resolution offline
-        await saveRemarkOffline(
-          orgId,
-          resolveRemarkId,
-          'RESOLVED',
-          resolutionNotes.trim()
-        )
+        await resolveRemarkOffline(resolveRemarkId, resolutionNotes.trim())
         toast({
           title: 'تم الحفظ محلياً',
           description: 'تم حفظ الحل محلياً وسيُرسل عند الاتصال',

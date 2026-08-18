@@ -97,3 +97,32 @@ async def test_push_sync_atomic_duplicate_is_idempotent(monkeypatch):
 
     assert result.processed == [op.operation_uuid]
     handler.assert_not_awaited()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_push_sync_atomic_routes_daily_log(monkeypatch):
+    db = SimpleNamespace(
+        execute=AsyncMock(return_value=_Result()),
+        begin_nested=lambda: _Savepoint([]),
+    )
+    handler = AsyncMock(return_value={"success": True, "conflicts": []})
+    monkeypatch.setattr(atomic_service, "_process_daily_log", handler)
+    monkeypatch.setattr(atomic_service, "_register_sync_log", AsyncMock())
+
+    op = SimpleNamespace(
+        operation_uuid="00000000-0000-0000-0000-000000000004",
+        device_timestamp=None,
+        entity_type=SimpleNamespace(value="DAILY_LOG"),
+        payload={"id": "00000000-0000-0000-0000-000000000005", "project_id": 1, "diary_date": "2026-08-18"},
+    )
+
+    result = await atomic_service.push_sync_atomic(
+        db=db,
+        user_context={"org_id": 1, "id": 7},
+        operations=[op],
+    )
+
+    assert result.processed == [op.operation_uuid]
+    assert result.conflicts == []
+    handler.assert_awaited_once()

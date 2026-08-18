@@ -21,6 +21,7 @@ from app.modules.sync.schemas import (
 from app.modules.sync.service import (
     _CLOCK_SKEW_SECONDS,
     _process_remark,
+    _process_daily_log,
     _process_unit_progress,
     _process_work_order,
     _register_sync_log,
@@ -98,6 +99,10 @@ async def push_sync_atomic(
                     )
                 elif entity_type == "REMARK":
                     result = await _process_remark(
+                        db, op, org_id, user_id, server_now
+                    )
+                elif entity_type == "DAILY_LOG":
+                    result = await _process_daily_log(
                         db, op, org_id, user_id, server_now
                     )
                 else:
