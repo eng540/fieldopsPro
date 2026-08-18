@@ -81,7 +81,15 @@ async def update_remark_status(remark_id: str, data: RemarkStatusUpdate, db: Asy
         raise HTTPException(status_code=404, detail=f"Remark {remark_id} not found.")
     current = remark.status
     if target == current:
-        raise HTTPException(status_code=409, detail=f"Remark is already in status {current}.")
+        if data.resolution_notes:
+            remark.resolution_notes = data.resolution_notes
+        if data.resolution_photos is not None:
+            remark.resolution_photos = data.resolution_photos
+        if target in {RemarkStatus.VERIFIED.value, RemarkStatus.RESOLVED.value, RemarkStatus.CLOSED.value} and remark.resolved_at is None:
+            remark.resolved_at = datetime.now(timezone.utc)
+        await db.flush()
+        await db.refresh(remark)
+        return remark
     if target not in REMARK_STATUS_TRANSITIONS.get(current, set()):
         raise HTTPException(status_code=409, detail=f"Invalid remark transition: {current} -> {target}.")
     if target == RemarkStatus.REWORK_REQUIRED.value and (not data.reason or len(data.reason.strip()) < 20):
