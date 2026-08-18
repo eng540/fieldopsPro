@@ -81,7 +81,7 @@ def upgrade() -> None:
                     (r.org_id, r.unit_id, r.boq_item_id, 0.0, 'NOT_STARTED',
                      0.0, FALSE, r.user_id,
                      r.baseline_at, r.baseline_at, r.baseline_at,
-                     1, 0.0, 0.0, v_event_id)
+                     1, 0.0, 0.0, NULL)
                 ON CONFLICT (unit_id, boq_item_id) DO NOTHING;
 
                 INSERT INTO execution_events
@@ -103,6 +103,14 @@ def upgrade() -> None:
                     WHERE p.unit_id = r.unit_id AND p.boq_item_id = r.boq_item_id
                 )
                 ON CONFLICT (id) DO NOTHING;
+
+                UPDATE unit_boq_progress
+                SET last_event_id = v_event_id,
+                    state_version = 1,
+                    updated_at = r.baseline_at
+                WHERE unit_id = r.unit_id
+                  AND boq_item_id = r.boq_item_id
+                  AND last_event_id IS NULL;
             END LOOP;
         END $$;
     """)
